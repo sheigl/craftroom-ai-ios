@@ -83,7 +83,10 @@ jobs:
           app=$(find build -type d -name 'CraftRoomAI.app' | head -n 1)
           test -n "$app"
           mkdir -p Payload
-          ditto "$app" Payload/
+          # NOTE: ditto SRC DST copies SRC's CONTENTS into an existing DST —
+          # the app bundle must be spelled out, or the ipa ships a flattened
+          # Payload/ with no .app dir and installd rejects it.
+          ditto "$app" Payload/CraftRoomAI.app
           zip -qry CraftRoomAI-unsigned.ipa Payload
           ls -lh CraftRoomAI-unsigned.ipa
 
