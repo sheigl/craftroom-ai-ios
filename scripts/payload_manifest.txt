@@ -1,0 +1,18 @@
+# Craft Room AI — app payload manifest (single source of truth)
+# Format: <kind><TAB><name>
+#   model — shipped as <name>.zip (a zipped .mlpackage directory)
+#   bin   — shipped as <name> (flat little-endian binary, verbatim)
+# Staged from desktop2:/mnt/500GB/code/craftroom-ai/ios_assets/app_payload/
+# plus the round-6 CFG embed bins baked on this box
+# (/home/sheigl/code/craftroom-ai/app_payload/).
+model	dit_int8.mlpackage
+model	vae_encoder_land_1248x832.mlpackage
+model	vae_decoder.mlpackage
+bin	sigmas.bin
+bin	txt_embeds_fp32.bin
+bin	txt_embeds_neg_fp32.bin
+bin	img_ids_land.bin
+bin	txt_ids.bin
+bin	bn_mean.bin
+bin	bn_var.bin
+bin	bn_eps.bin

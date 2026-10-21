@@ -1,0 +1,105 @@
+# Path A build: unsigned device .ipa from a clean checkout.
+#
+# The ~3.9 GB model payload never rides git. First run per payload tag
+# downloads it from the payload channel (GitHub Release assets or a Hugging
+# Face repo) and actions/cache keeps it for later runs (10 GB/repo cache).
+#
+# The app is built for a real device (arm64 iphoneos) WITHOUT signing;
+# Sideloadly/AltStore re-signs the unsigned .app with the free Apple ID on
+# the Mac. See docs/SIDELOAD.md.
+name: build-unsigned-ipa
+
+on:
+  workflow_dispatch:
+    inputs:
+      payload_channel:
+        description: release (GitHub Release assets) or hf (Hugging Face repo)
+        required: true
+        default: release
+        type: choice
+        options: [release, hf]
+      payload_tag:
+        description: payload version (GitHub Release tag / HF revision)
+        required: true
+        default: payload-v1
+        type: string
+
+jobs:
+  ipa:
+    # arm64 macOS runner with the full Xcode toolchain. Pin when the
+    # default image starts drifting (see README "runner pinning").
+    runs-on: macos-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore cached payload
+        id: cache
+        uses: actions/cache@v4
+        with:
+          # Resources/ rides the cache too: on a cache hit the fetch step
+          # is skipped, and xcodegen needs Resources/{models,bins} present.
+          path: |
+            .payload-cache
+            Resources/models
+            Resources/bins
+          key: payload-${{ inputs.payload_channel }}-${{ inputs.payload_tag }}
+
+      - name: Fetch payload (cache-miss only)
+        if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          PAYLOAD_CHANNEL: ${{ inputs.payload_channel }}
+          PAYLOAD_REPO: ${{ vars.PAYLOAD_REPO }}
+          PAYLOAD_TAG: ${{ inputs.payload_tag }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: bash scripts/fetch_payload.sh
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Generate project
+        run: xcodegen generate
+
+      - name: Build (unsigned, arm64 device)
+        run: |
+          set -euo pipefail
+          xcodebuild build \
+            -project CraftRoomAI.xcodeproj \
+            -scheme CraftRoomAI \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            -quiet \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_IDENTITY=- \
+            CODE_SIGNING_REQUIRED=NO \
+            ONLY_ACTIVE_ARCH=YES \
+            ARCHS=arm64
+
+      - name: Package unsigned ipa
+        run: |
+          set -euo pipefail
+          app=$(find build -type d -name 'CraftRoomAI.app' | head -n 1)
+          test -n "$app"
+          mkdir -p Payload
+          ditto "$app" Payload/
+          zip -qry CraftRoomAI-unsigned.ipa Payload
+          ls -lh CraftRoomAI-unsigned.ipa
+
+      - name: Split ipa for artifact file limits
+        # upload-artifact has a 2 GB single-file ceiling; the ipa carries
+        # the int8 DiT, so split into 1.9 GB parts. Reassemble on the Mac:
+        #   cat CraftRoomAI-unsigned.ipa.part-* > CraftRoomAI-unsigned.ipa
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          split -b 1900m CraftRoomAI-unsigned.ipa out/CraftRoomAI-unsigned.ipa.part-
+          ls -l out
+
+      - name: Upload ipa parts
+        uses: actions/upload-artifact@v4
+        with:
+          name: CraftRoomAI-unsigned-ipa
+          path: out/CraftRoomAI-unsigned.ipa.part-*
+          compression-level: 1   # model weights are already compressed
+          retention-days: 1
