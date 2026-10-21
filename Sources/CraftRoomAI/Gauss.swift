@@ -1,5 +1,7 @@
 /// Seedable splitmix64 PRNG + Box–Muller gaussian, for the raw-noise init
 /// (Phase A default seed 0; matches the reference eval recipe).
+import Foundation
+
 struct SplitMix64 {
     var state: UInt64
     mutating func next() -> UInt64 {

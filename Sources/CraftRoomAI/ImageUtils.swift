@@ -9,10 +9,10 @@ enum ImageUtils {
         guard native.width > 0, native.height > 0 else {
             throw PipError.image("zero-size image")
         }
-        let fmt = UIGraphicsImageFormat()
+        let fmt = UIGraphicsImageRendererFormat.default()
         fmt.size = native
         fmt.opaque = true
-        let upright = UIGraphicsImageRenderer(format: fmt).image { _ in
+        let upright = UIGraphicsImageRenderer(size: native, format: fmt).image { _ in
             image.draw(in: CGRect(origin: .zero, size: native))
         }
         guard let src = upright.cgImage else { throw PipError.image("no CGImage") }
@@ -30,11 +30,12 @@ enum ImageUtils {
 
         // 3. rescale to the export shape
         let w = Geo.photoW, h = Geo.photoH
-        guard let cs = CGColorSpace(name: .sRGB),
+        guard let cs = CGColorSpace(name: CGColorSpace.sRGB),
               let ctx = CGContext(data: nil, width: w, height: h,
                                   bitsPerComponent: 8, bytesPerRow: w * 4,
                                   space: cs,
-                                  bitmapInfo: [.byteOrder32BitLittle, .alphaNoneMask]) else {
+                                  bitmapInfo: [.byteOrder32Little,
+                                               CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipFirst.rawValue)]) else {
             throw PipError.image("no context")
         }
         ctx.interpolationQuality = .high

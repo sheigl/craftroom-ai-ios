@@ -193,12 +193,15 @@ final class Engine {
 struct ImagePicker: UIViewControllerRepresentable {
     var onPick: (UIImage) -> Void
 
-    func makeUIViewController() -> UIImagePickerController {
+    func makeUIViewController(context: Context) -> UIImagePickerController {
         let picker = UIImagePickerController()
         picker.sourceType = .photoLibrary
         picker.allowsEditing = false
+        picker.delegate = context.coordinator
         return picker
     }
+
+    func updateUIViewController(_ picker: UIImagePickerController, context: Context) {}
 
     func makeCoordinator() -> Coordinator { Coordinator(onPick: onPick) }
 
@@ -207,9 +210,8 @@ struct ImagePicker: UIViewControllerRepresentable {
         init(onPick: @escaping (UIImage) -> Void) { self.onPick = onPick }
 
         func imagePickerController(_ picker: UIImagePickerController,
-                                   didFinishPicking mediaType: String,
-                                   info: [String: Any]) {
-            if let img = info[UIImagePickerController.InfoKey.originalImage] as? UIImage {
+                                   didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
+            if let img = info[.originalImage] as? UIImage {
                 onPick(img)
             }
             picker.dismiss(animated: true)

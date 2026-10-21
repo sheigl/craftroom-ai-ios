@@ -6,7 +6,9 @@ enum ComputeUnitsOption: String, CaseIterable, Identifiable {
     case cpuAndGPU = "CPU+GPU"
     case cpuOnly = "CPU only"
 
-    var pref: MLComputeDevicePref {
+    var id: String { rawValue }
+
+    var pref: MLComputeUnits {
         switch self {
         case .all:        return .all
         case .cpuAndGPU:  return .cpuAndGPU
@@ -62,7 +64,7 @@ final class Inference {
         return Date().timeIntervalSince(t0)
     }
 
-    static func loadModel(named: String, units: MLComputeDevicePref) throws -> MLModel {
+    static func loadModel(named: String, units: MLComputeUnits) throws -> MLModel {
         let cfg = MLModelConfiguration()
         cfg.computeUnits = units
         // Xcode precompiles bundled .mlpackage files into .mlmodelc; fall back
@@ -71,8 +73,18 @@ final class Inference {
             return try MLModel(contentsOf: u, configuration: cfg)
         }
         if let u = Bundle.main.url(forResource: named, withExtension: "mlpackage") {
-            let compiled = try MLModel.compileModel(at: u, options: nil)
-            return try MLModel(contentsOf: compiled, configuration: cfg)
+            // compileModel is async-only in the current SDK; block on a
+            // semaphore (loadModels is always called off the main thread —
+            // see Engine.run via Task.detached).
+            var result: Result<URL, Error>?
+            let sem = DispatchSemaphore(value: 0)
+            MLModel.compileModel(at: u) { r in
+                result = r
+                sem.signal()
+            }
+            sem.wait()
+            guard let result else { throw PipError.model("compileModel: no result for \(named)") }
+            return try MLModel(contentsOf: try result.get(), configuration: cfg)
         }
         throw PipError.model("not found in bundle: \(named)")
     }
@@ -80,7 +92,7 @@ final class Inference {
     // MARK: MLMultiArray helpers
 
     static func f32(_ shape: [Int], _ src: [Float]) throws -> MLMultiArray {
-        let a = try MLMultiArray(shape: shape.map { NSNumber(value: $0) }, elementType: .float32)
+        let a = try MLMultiArray(shape: shape.map { NSNumber(value: $0) }, dataType: .float32)
         guard a.count == src.count else { throw PipError.badPayload("f32 fill \(a.count) != \(src.count)") }
         let p = a.dataPointer.bindMemory(to: Float.self, capacity: a.count)
         for i in 0..<src.count { p[i] = src[i] }
@@ -88,7 +100,7 @@ final class Inference {
     }
 
     static func i32(_ shape: [Int], _ src: [Int32]) throws -> MLMultiArray {
-        let a = try MLMultiArray(shape: shape.map { NSNumber(value: $0) }, elementType: .int32)
+        let a = try MLMultiArray(shape: shape.map { NSNumber(value: $0) }, dataType: .int32)
         guard a.count == src.count else { throw PipError.badPayload("i32 fill \(a.count) != \(src.count)") }
         let p = a.dataPointer.bindMemory(to: Int32.self, capacity: a.count)
         for i in 0..<src.count { p[i] = src[i] }
@@ -96,20 +108,32 @@ final class Inference {
     }
 
     static func fp32Copy(_ a: MLMultiArray) throws -> [Float] {
-        let conv = a.dataType == .float32 ? a : try a.withType(.float32)
-        let p = conv.dataPointer.bindMemory(to: Float.self, capacity: conv.count)
-        var out = [Float](repeating: 0, count: conv.count)
-        for i in 0..<conv.count { out[i] = p[i] }
+        let n = a.count
+        var out = [Float](repeating: 0, count: n)
+        // The DiT ships FLOAT16 output (per the dumped spec); the VAEs ship
+        // FLOAT32. Convert manually — no withType-style API on MLMultiArray.
+        switch a.dataType {
+        case .float32:
+            let p = a.dataPointer.bindMemory(to: Float.self, capacity: n)
+            for i in 0..<n { out[i] = p[i] }
+        case .float16:
+            let p = a.dataPointer.bindMemory(to: Float16.self, capacity: n)
+            for i in 0..<n { out[i] = Float(p[i]) }
+        case .int32:
+            let p = a.dataPointer.bindMemory(to: Int32.self, capacity: n)
+            for i in 0..<n { out[i] = Float(p[i]) }
+        default:
+            throw PipError.model("unsupported MLMultiArray dataType \(a.dataType)")
+        }
         return out
     }
 
     static func predict(_ model: MLModel, _ arrays: [String: MLMultiArray]) throws -> [Float] {
-        let dict = try MLDictionary()
-        for (name, arr) in arrays {
-            try dict.setMultiArrayValue(arr, forName: name)
-        }
-        let out = try model.prediction(from: dict, options: nil)
-        guard let outName = model.modelDescription.outputDescriptions.keys.first,
+        var items: [String: MLFeatureValue] = [:]
+        for (name, arr) in arrays { items[name] = MLFeatureValue(multiArray: arr) }
+        let provider = try MLDictionaryFeatureProvider(dictionary: items)
+        let out = try model.prediction(from: provider)
+        guard let outName = model.modelDescription.outputDescriptionsByName.keys.first,
               let fv = out.featureValue(forName: outName),
               let ma = fv.multiArrayValue else {
             throw PipError.model("\(type(of: model)): no multiarray output")
@@ -166,7 +190,7 @@ final class Inference {
         let cfg = guidance > 1 && ehsNeg != nil
 
         var stepMemPeak: UInt64 = 0
-        stats.stepMillis.removeAll(keepingCapacity: 0)
+        stats.stepMillis.removeAll(keepingCapacity: true)
         for i in 0..<30 {
             let t0 = Date()
             for k in 0..<noiseCount { hp[k] = noise[k] }
@@ -247,11 +271,12 @@ final class Inference {
             bytes[i * 4 + 1] = ch8(planar[wh + i])       // G
             bytes[i * 4 + 2] = ch8(planar[i])            // R
         }
-        guard let cs = CGColorSpace(name: .sRGB),
+        guard let cs = CGColorSpace(name: CGColorSpace.sRGB),
               let ctx = CGContext(data: &bytes, width: w, height: h,
                                   bitsPerComponent: 8, bytesPerRow: w * 4,
                                   space: cs,
-                                  bitmapInfo: [.byteOrder32BitLittle, .alphaNoneMask]) else {
+                                  bitmapInfo: [.byteOrder32Little,
+                                               CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipFirst.rawValue)]) else {
             throw PipError.image("no bitmap context")
         }
         guard let cg = ctx.makeImage() else { throw PipError.image("no CGImage") }
@@ -280,7 +305,7 @@ final class Inference {
         let tPrep0 = Date()
         let pixels = try ImageUtils.normalizedPixels(image)   // CHW [-1,1]
         let hidden = try MLMultiArray(shape: [1, Geo.totalTokens, Geo.tokenC].map { NSNumber(value: $0) },
-                                       elementType: .float32)
+                                       dataType: .float32)
         let ehs = try Inference.f32([1, Geo.txtTokens, Geo.txtDim], payload.txtEmbeds)
         let imgA = try Inference.i32([1, Geo.totalTokens, 4], payload.imgIds)
         let txtA = try Inference.i32([1, Geo.txtTokens, 4], payload.txtIds)

@@ -39,7 +39,7 @@ struct Payload {
             guard let url = Bundle.main.url(forResource: name, withExtension: "bin") else {
                 throw PipError.missingResource(name)
             }
-            return [UInt8](try Data(contentsOf: url, options: .mapped))
+            return [UInt8](try Data(contentsOf: url, options: .alwaysMapped))
         }
         func floats(_ b: [UInt8]) -> [Float] {
             var out = [Float](repeating: 0, count: b.count / 4)
@@ -68,7 +68,7 @@ struct Payload {
         // generate-time with a clear message).
         var neg: [Float]?
         if let u = Bundle.main.url(forResource: "txt_embeds_neg_fp32", withExtension: "bin") {
-            let v = floats([UInt8](try Data(contentsOf: u, options: .mapped)))
+            let v = floats([UInt8](try Data(contentsOf: u, options: .alwaysMapped)))
             if v.count == Geo.txtTokens * Geo.txtDim { neg = v }
         }
         let p = Payload(

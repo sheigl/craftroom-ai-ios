@@ -1,6 +1,6 @@
 import SwiftUI
 
-@Main
+@main
 struct CraftRoomAIApp: App {
     var body: some Scene {
         WindowGroup {
