@@ -51,6 +51,7 @@ jobs:
           PAYLOAD_CHANNEL: ${{ inputs.payload_channel }}
           PAYLOAD_REPO: ${{ vars.PAYLOAD_REPO }}
           PAYLOAD_TAG: ${{ inputs.payload_tag }}
+          PAYLOAD_TOKEN: ${{ secrets.PAYLOAD_TOKEN }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: bash scripts/fetch_payload.sh
 

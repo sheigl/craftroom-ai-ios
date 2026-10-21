@@ -10,17 +10,21 @@
 #   PAYLOAD_CACHE    cache dir (default .payload-cache) — download happens
 #                    here once per tag, Resources/ is populated from it, so
 #                    actions/cache can key on the tag.
-#   GITHUB_TOKEN     required for the release channel (private repo assets);
-#                    Actions provides it built in.
+#   PAYLOAD_TOKEN    required for the release channel: a token with access
+#                    to PAYLOAD_REPO (repo secret in CI). The built-in
+#                    GITHUB_TOKEN also works if PAYLOAD_REPO is public.
+#   GITHUB_TOKEN     fallback for PAYLOAD_TOKEN.
 #   HF_TOKEN         optional; only needed for a private HF repo.
 #
-# Release-channel note (2026-10-21): the web URL
-# https://<host>/owner/repo/releases/download/<tag>/<asset> returns 404 for
-# PRIVATE repos even with a valid PAT, so assets are downloaded through the
-# REST asset endpoint instead: GET /repos/{repo}/releases/tags/{tag} to
-# resolve the asset id, then GET /repos/{repo}/releases/assets/{id} with
-# Accept: application/octet-stream (302 -> signed storage URL). This is the
-# same path `gh release download` uses.
+# Release-channel note (2026-10-21): the built-in GITHUB_TOKEN is
+# repository-scoped and 404s on ANOTHER private repo's release assets, so
+# CI stores a repo secret PAYLOAD_TOKEN (a token owned by the account that
+# can read PAYLOAD_REPO). Release assets are downloaded through the REST
+# asset endpoint: GET /repos/{repo}/releases/tags/{tag} to resolve the
+# asset id, then GET /repos/{repo}/releases/assets/{id} with
+# Accept: application/octet-stream (302 -> signed storage URL) — the web
+# /releases/download/<tag>/<asset> URL also 404s for private repos even
+# with a valid token. Same path `gh release download` uses.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -30,11 +34,20 @@ TAG="${PAYLOAD_TAG:-payload-v1}"
 CACHE="${PAYLOAD_CACHE:-.payload-cache}"
 MANIFEST="scripts/payload_manifest.txt"
 
+# Release-channel token: PAYLOAD_TOKEN wins; GITHUB_TOKEN is the fallback
+# (works when PAYLOAD_REPO is public — GITHUB_TOKEN cannot read other
+# private repos' assets).
+REL_TOKEN="${PAYLOAD_TOKEN:-${GITHUB_TOKEN:-}}"
+if [[ "$CHANNEL" == "release" && -z "$REL_TOKEN" ]]; then
+  echo "release channel needs PAYLOAD_TOKEN (or GITHUB_TOKEN)" >&2
+  exit 1
+fi
+
 mkdir -p "$CACHE/$TAG/models" "$CACHE/$TAG/bins" Resources/models Resources/bins
 
-api() { # api-path — GET api.github.com/<path> with the token
+api() { # api-path — GET api.github.com/<path> with the release token
   curl -fsSL --retry 3 \
-    -H "Authorization: token ${GITHUB_TOKEN:?set GITHUB_TOKEN for the release channel}" \
+    -H "Authorization: token $REL_TOKEN" \
     "https://api.github.com/$1"
 }
 
@@ -77,7 +90,7 @@ PY
     [[ -n "$id" ]] || return 1
     echo "fetch release asset $name (id $id)"
     local tmp="$dest.tmp"
-    if curl -fsSL --retry 3 -H "Authorization: token $GITHUB_TOKEN" \
+    if curl -fsSL --retry 3 -H "Authorization: token $REL_TOKEN" \
         -H "Accept: application/octet-stream" \
         -o "$tmp" "https://api.github.com/repos/$REPO/releases/assets/$id"; then
       mv "$tmp" "$dest"
