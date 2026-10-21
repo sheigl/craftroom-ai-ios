@@ -22,19 +22,24 @@ MANIFEST="scripts/payload_manifest.txt"
 
 mkdir -p "$CACHE/$TAG/models" "$CACHE/$TAG/bins" Resources/models Resources/bins
 
-fetch() { # url dest
+try_fetch() { # url dest — 0 on success, 1 on HTTP failure (e.g. 404); never exits
   if [[ -f "$2" ]]; then return 0; fi
   echo "fetch $1"
-  local tmp="$2.part"
+  local tmp="$2.tmp"
+  local auth=()
   if [[ -n "${HF_TOKEN:-}" && "$CHANNEL" == "hf" ]]; then
-    curl -fsSL --retry 3 -H "Authorization: Bearer $HF_TOKEN" -o "$tmp" "$1"
+    auth=(-H "Authorization: Bearer $HF_TOKEN")
   elif [[ -n "${GITHUB_TOKEN:-}" && "$CHANNEL" == "release" ]]; then
     # private release assets need auth; Actions provides GITHUB_TOKEN
-    curl -fsSL --retry 3 -H "Authorization: token $GITHUB_TOKEN" -o "$tmp" "$1"
-  else
-    curl -fsSL --retry 3 -o "$tmp" "$1"
+    auth=(-H "Authorization: token $GITHUB_TOKEN")
   fi
-  mv "$tmp" "$2"
+  if curl -fsSL --retry 3 "${auth[@]}" -o "$tmp" "$1"; then
+    mv "$tmp" "$2"
+    return 0
+  else
+    rm -f "$tmp"
+    return 1
+  fi
 }
 
 while IFS=$'\t' read -r kind name; do
@@ -45,11 +50,30 @@ while IFS=$'\t' read -r kind name; do
     model)
       base="$CACHE/$TAG/models/$name.zip"
       if [[ "$CHANNEL" == "release" ]]; then
-        url="https:$(printf '\x2f\x2f')github.com/$REPO/releases/download/$TAG/$name.zip"
+        baseurl="https:$(printf '\x2f\x2f')github.com/$REPO/releases/download/$TAG"
       else
-        url="https:$(printf '\x2f\x2f')huggingface.co/$REPO/resolve/$TAG/$name.zip"
+        baseurl="https:$(printf '\x2f\x2f')huggingface.co/$REPO/resolve/$TAG"
       fi
-      fetch "$url" "$base"
+      if [[ ! -f "$base" ]]; then
+        # whole zip first (small models + hf are single-file); large models
+        # are split into <2GB parts on upload and rejoined with `cat` here
+        if ! try_fetch "$baseurl/$name.zip" "$base"; then
+          rm -f "$base"
+          got=0
+          for i in 00 01 02 03 04 05 06 07 08 09; do
+            part="$CACHE/$TAG/models/$name.zip.part.$i"
+            if try_fetch "$baseurl/$name.zip.part.$i" "$part"; then
+              got=1
+            else
+              rm -f "$part"
+              break
+            fi
+          done
+          [[ $got -eq 1 ]] || { echo "no zip and no parts for $name" >&2; exit 1; }
+          cat "$CACHE/$TAG/models/$name.zip.part."* > "$base"
+          rm -f "$CACHE/$TAG/models/$name.zip.part."*
+        fi
+      fi
       target="Resources/models/$name"
       if [[ ! -d "$target" ]]; then
         unzip -q "$base" -d Resources/models

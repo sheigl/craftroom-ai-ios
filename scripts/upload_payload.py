@@ -24,6 +24,7 @@ Usage (from the payload root, i.e. the dir holding app_payload/):
       --dir ios_assets/app_payload
 """
 import argparse
+import glob
 import os
 import shlex
 import shutil
@@ -33,6 +34,8 @@ import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MANIFEST = os.path.join(HERE, "payload_manifest.txt")
+# GitHub release assets cap at 2 GB (2147483648 B); 1.9 GiB parts stay under it.
+SPLIT_THRESHOLD = 1900 * 1024 * 1024
 
 
 def load_manifest():
@@ -66,8 +69,17 @@ def zip_mlpackage(src_dir, name, staging):
                 rel = os.path.relpath(full, src_dir)
                 zf.write(full, rel)
     size = os.path.getsize(out) / 2**30
-    print(f"zipped {name}.zip: {size:.2f} GiB")
-    return out
+    print(f"zipped {name}.zip: {size:.2f} GiB", flush=True)
+    if os.path.getsize(out) > SPLIT_THRESHOLD:
+        # GitHub release assets cap at 2 GB; split into <2GB parts that
+        # scripts/fetch_payload.sh rejoins with `cat` before unzipping.
+        subprocess.run(["split", "-b", "1900m", "-d", out, out + ".part."],
+                       check=True)
+        os.remove(out)
+        parts = sorted(glob.glob(out + ".part.*"))
+        print(f"split {name}.zip into {len(parts)} parts (<2GB each)", flush=True)
+        return parts
+    return [out]
 
 
 def main():
@@ -85,7 +97,7 @@ def main():
     uploads = []
     for kind, name in items:
         if kind == "model":
-            uploads.append(zip_mlpackage(args.dir, name, staging))
+            uploads.extend(zip_mlpackage(args.dir, name, staging))
         else:
             src = os.path.join(args.dir, name)
             if not os.path.isfile(src):
@@ -102,8 +114,8 @@ def main():
         run(["gh", "release", "create", args.tag,
              "--repo", args.repo,
              "--title", f"app payload {args.tag}",
-             "--notes", "Craft Room AI Phase A payload (models + bins)",
-             "--verify_asset"] + uploads)
+             "--notes", "Craft Room AI Phase A payload (models + bins)"]
+            + uploads)
     else:
         run(["hf", "upload", "--repo-type", "model", args.repo,
              staging, "--", "--include", "*"])
