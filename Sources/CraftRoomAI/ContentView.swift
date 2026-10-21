@@ -205,7 +205,7 @@ struct ImagePicker: UIViewControllerRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator(onPick: onPick) }
 
-    final class Coordinator: NSObject, UIImagePickerControllerDelegate {
+    final class Coordinator: NSObject, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
         var onPick: (UIImage) -> Void
         init(onPick: @escaping (UIImage) -> Void) { self.onPick = onPick }
 

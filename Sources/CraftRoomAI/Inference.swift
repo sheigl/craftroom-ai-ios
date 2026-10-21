@@ -58,9 +58,9 @@ final class Inference {
     @discardableResult
     func loadModels(units: ComputeUnitsOption) throws -> Double {
         let t0 = Date()
-        dit = try Inference.loadModel("dit_int8", units: units.pref)
-        vaeEnc = try Inference.loadModel("vae_encoder_land_1248x832", units: units.pref)
-        vaeDec = try Inference.loadModel("vae_decoder", units: units.pref)
+        dit = try Inference.loadModel(named: "dit_int8", units: units.pref)
+        vaeEnc = try Inference.loadModel(named: "vae_encoder_land_1248x832", units: units.pref)
+        vaeDec = try Inference.loadModel(named: "vae_decoder", units: units.pref)
         return Date().timeIntervalSince(t0)
     }
 
@@ -134,7 +134,7 @@ final class Inference {
         let provider = try MLDictionaryFeatureProvider(dictionary: items)
         let out = try model.prediction(from: provider)
         guard let outName = model.modelDescription.outputDescriptionsByName.keys.first,
-              let fv = out.featureValue(forName: outName),
+              let fv = out.featureValue(for: outName),
               let ma = fv.multiArrayValue else {
             throw PipError.model("\(type(of: model)): no multiarray output")
         }

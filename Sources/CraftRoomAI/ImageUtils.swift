@@ -10,7 +10,6 @@ enum ImageUtils {
             throw PipError.image("zero-size image")
         }
         let fmt = UIGraphicsImageRendererFormat.default()
-        fmt.size = native
         fmt.opaque = true
         let upright = UIGraphicsImageRenderer(size: native, format: fmt).image { _ in
             image.draw(in: CGRect(origin: .zero, size: native))
@@ -40,10 +39,9 @@ enum ImageUtils {
         }
         ctx.interpolationQuality = .high
         ctx.draw(cropped, in: CGRect(x: 0, y: 0, width: CGFloat(w), height: CGFloat(h)))
-        guard let scaled = ctx.makeImage(), let cfData = scaled.dataProvider?.copyData() else {
-            throw PipError.image("scale failed")
-        }
-        let bytes = [UInt8](cfData as Data)   // row-major, B,G,R,A (32BitLittle)
+        guard let raw = ctx.data else { throw PipError.image("scale failed") }
+        let bytes = [UInt8](UnsafeBufferPointer(
+            start: raw.bindMemory(to: UInt8.self, capacity: w * h * 4), count: w * h * 4))
         guard bytes.count >= w * h * 4 else { throw PipError.image("short bitmap") }
 
         // 4. CHW, [-1,1]
