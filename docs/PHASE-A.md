@@ -54,3 +54,37 @@ it out — compare to the g3.0 B65 arm in eval/sheet_ladder.png).
 - Guidance > 1 needs `txt_embeds_neg_fp32.bin` in the payload; the app
   refuses loudly if it is missing.
 - First run per model set recompiles — the load line, not the loop line.
+
+## When it fails: reading the evidence (0.2.0+)
+
+The iPad has no console and a memory kill leaves no crash report, so the app
+carries its own record:
+
+- **Header line** under the title: `v0.2.0 (2) · <hw.machine> · iPadOS <ver> ·
+  <RAM> MB RAM · <free> free · footprint <MB>`. Screenshot that first — it
+  answers "which chip, which OS, how much headroom".
+- **`Documents/phaseA.log`** — written as the run proceeds: the header summary,
+  one line per stage, a line every 5 diffusion steps (milliseconds, footprint,
+  free MB), and the exact error. Pull it with Finder → iPad → *Craft Room AI* →
+  phaseA.log (UIFileSharingEnabled), or from the Files app on the device. After
+  a crash it ends at the last thing that ran, which is the whole point.
+- **Errors name the model and the compute-unit set**, e.g.
+  `Loading models (All (ANE+GPU))… failed: dit_int8 [All (ANE+GPU)]: <CoreML
+  message>`. If a set cannot build a plan, the app now degrades to
+  **CPU+GPU** and then **CPU only** automatically, and the stats card's
+  `units:` line reports the set that actually ran — compare it to the picker.
+
+### The -14 class of failure
+
+`failed to build model execution plan using a model architecture file` is a
+CoreML plan-build refusal. Two causes matter here:
+
+1. **OS too old for the mlprogram spec.** The shipped DiT is
+   `specificationVersion 8` (= iPadOS/iOS **18**), even though the export asked
+   for iOS17 — the unquantized probe is spec 8 too, so it is the conversion,
+   not the int8 quantization. On an iPadOS 17 device this refuses to load; the
+   fix is to update the iPad, or re-export the DiT at spec 7 on desktop2 and
+   re-upload the payload.
+2. **ANE cannot plan this shape/quantization.** Then the CPU+GPU (or CPU only)
+   fallback should load and run — if it does, the timing row to report is that
+   fallback's, and the ANE arm is a Phase B problem, not a Phase A blocker.
