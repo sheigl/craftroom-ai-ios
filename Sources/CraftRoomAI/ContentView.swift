@@ -13,6 +13,9 @@ struct ContentView: View {
     // ladder verdict: guidance 3.0 is the ship setting (2.0 fallback); the
     // picker lets one device run measure 1.0 (30 forwards) vs 3.0 (60 forwards)
     @State private var guidance: Double = 3.0
+    /// Last pipeline stage reached — an error is reported against it, and a
+    /// kill leaves it in phaseA.log.
+    @State private var stage = "start"
 
     private let engine = Engine()
 
@@ -21,6 +24,10 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 16) {
                 Text("Craft Room AI — Phase A")
                     .font(.largeTitle.bold())
+                Text("\(Diagnostics.build) · \(Diagnostics.summary())")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
 
                 controls
                 Text(status)
@@ -110,17 +117,29 @@ struct ContentView: View {
         let seed = UInt64(seedText.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
         running = true
         stats = ""
+        status = "Starting…"
+        stage = "start"
         let units = self.units
         let guidance = self.guidance
+        Diagnostics.reset("run on \(units.rawValue) guidance \(String(format: "%.1f", guidance))"
+            + " seed \(seed) photo \(Int(photo.size.width))x\(Int(photo.size.height))")
         Task.detached(priority: .userInitiated) {
+            // boxed local: the same thread writes it in the sink and reads it in
+            // the catch, and reading @State off-main would be unsound
+            var lastStage = "start"
             do {
-                let stage: (String) -> Void = { msg in
-                    Task { await MainActor.run { status = msg } }
+                let stageSink: (String) -> Void = { msg in
+                    lastStage = msg
+                    Diagnostics.log("stage: " + msg)
+                    Task { await MainActor.run {
+                        status = msg
+                        stage = msg
+                    } }
                 }
                 let (img, s) = try await engine.run(units: units, photo: photo,
-                                                     seed: seed,
-                                                     guidance: Float(guidance),
-                                                     onStage: stage)
+                                                    seed: seed,
+                                                    guidance: Float(guidance),
+                                                    onStage: stageSink)
                 await MainActor.run {
                     running = false
                     result = img
@@ -128,9 +147,12 @@ struct ContentView: View {
                     stats = Self.format(s)
                 }
             } catch {
+                let msg = error.localizedDescription
+                let failedAt = lastStage   // immutable copy for the @Sendable hop
+                Diagnostics.log("ERROR at \(failedAt): \(msg)")
                 await MainActor.run {
                     running = false
-                    status = "Run failed: \(error.localizedDescription)"
+                    status = "\(failedAt) failed: \(msg)"
                 }
             }
         }
@@ -183,7 +205,9 @@ final class Engine {
         var (img, stats) = try inference.generate(from: photo, seed: seed,
                                                   guidance: guidance, onStage: onStage)
         stats.modelLoad = lastLoad
-        stats.units = units.rawValue
+        // report the set that actually ran, not the one requested (they differ
+        // when a plan build failed and Inference degraded)
+        stats.units = inference.effectiveUnits.rawValue
         return (img, stats)
     }
 }

@@ -48,6 +48,9 @@ final class Inference {
     private var dit: MLModel?
     private var vaeEnc: MLModel?
     private var vaeDec: MLModel?
+    /// The compute-unit set that actually loaded; differs from the requested one
+    /// when a plan build failed and the run degraded (see loadModels).
+    private(set) var effectiveUnits: ComputeUnitsOption = .all
 
     init() throws {
         payload = try Payload.load()
@@ -58,21 +61,60 @@ final class Inference {
     @discardableResult
     func loadModels(units: ComputeUnitsOption) throws -> Double {
         let t0 = Date()
-        dit = try Inference.loadModel(named: "dit_int8", units: units.pref)
-        vaeEnc = try Inference.loadModel(named: "vae_encoder_land_1248x832", units: units.pref)
-        vaeDec = try Inference.loadModel(named: "vae_decoder", units: units.pref)
-        return Date().timeIntervalSince(t0)
+        // A CoreML plan-build failure ("failed to build model execution plan",
+        // code -14) is compute-unit specific in practice: an int8 plan the ANE
+        // refuses can still build on the GPU. Degrade through the remaining sets
+        // instead of failing the whole run, and keep what worked so the stats
+        // card reports the set that really ran.
+        var candidates: [ComputeUnitsOption] = [units]
+        for c in [ComputeUnitsOption.cpuAndGPU, .cpuOnly] where !candidates.contains(c) {
+            candidates.append(c)
+        }
+        var lastError: Error?
+        for cand in candidates {
+            do {
+                let t = Date()
+                dit = try Self.loadModel(named: "dit_int8", units: cand)
+                Diagnostics.log("dit_int8 loaded on \(cand.rawValue) in "
+                    + String(format: "%.1f", Date().timeIntervalSince(t)) + " s")
+                vaeEnc = try Self.loadModel(named: "vae_encoder_land_1248x832", units: cand)
+                vaeDec = try Self.loadModel(named: "vae_decoder", units: cand)
+                effectiveUnits = cand
+                if cand != units {
+                    Diagnostics.log("NOTE: \(units.rawValue) failed to load — running on \(cand.rawValue)")
+                }
+                return Date().timeIntervalSince(t0)
+            } catch {
+                lastError = error
+                Diagnostics.log("load failed on \(cand.rawValue): \(error.localizedDescription)")
+                dit = nil
+                vaeEnc = nil
+                vaeDec = nil
+            }
+        }
+        if let lastError { throw lastError }
+        throw PipError.model("no compute-unit set could load the models")
     }
 
-    static func loadModel(named: String, units: MLComputeUnits) throws -> MLModel {
+    /// Loads one bundled model, re-labelling any failure with the model name and
+    /// compute-unit set so the on-screen error says which piece broke and where.
+    static func loadModel(named: String, units set: ComputeUnitsOption) throws -> MLModel {
+        do {
+            return try loadModel(name: named, units: set.pref)
+        } catch {
+            throw PipError.model("\(named) [\(set.rawValue)]: \(error.localizedDescription)")
+        }
+    }
+
+    private static func loadModel(name: String, units: MLComputeUnits) throws -> MLModel {
         let cfg = MLModelConfiguration()
         cfg.computeUnits = units
         // Xcode precompiles bundled .mlpackage files into .mlmodelc; fall back
         // to on-device compilation if the bundle carries the raw package.
-        if let u = Bundle.main.url(forResource: named, withExtension: "mlmodelc") {
+        if let u = Bundle.main.url(forResource: name, withExtension: "mlmodelc") {
             return try MLModel(contentsOf: u, configuration: cfg)
         }
-        if let u = Bundle.main.url(forResource: named, withExtension: "mlpackage") {
+        if let u = Bundle.main.url(forResource: name, withExtension: "mlpackage") {
             // compileModel is async-only in the current SDK; block on a
             // semaphore (loadModels is always called off the main thread —
             // see Engine.run via Task.detached).
@@ -83,10 +125,10 @@ final class Inference {
                 sem.signal()
             }
             sem.wait()
-            guard let result else { throw PipError.model("compileModel: no result for \(named)") }
+            guard let result else { throw PipError.model("compileModel: no result for \(name)") }
             return try MLModel(contentsOf: try result.get(), configuration: cfg)
         }
-        throw PipError.model("not found in bundle: \(named)")
+        throw PipError.model("not found in bundle: \(name)")
     }
 
     // MARK: MLMultiArray helpers
@@ -228,6 +270,14 @@ final class Inference {
             }
             stats.stepMillis.append(Date().timeIntervalSince(t0) * 1000)
             stepMemPeak = max(stepMemPeak, currentFootprint())
+            if i % 5 == 0 || i == 29 {
+                let free = Diagnostics.availableMemoryMB()
+                    .map { String(format: "%.0f", $0) } ?? "n/a"
+                Diagnostics.log("step \(i + 1)/30 "
+                    + String(format: "%.0f ms · footprint %.0f MB · free %@ MB",
+                              stats.stepMillis[i],
+                              Double(stepMemPeak) / 1_048_576.0, free))
+            }
         }
         stats.peakMemMB = max(stats.peakMemMB, Double(stepMemPeak) / 1_048_576.0)
     }
@@ -290,6 +340,8 @@ final class Inference {
         var s = RunStats()
         let t0 = Date()
         var memPeak: UInt64 = currentFootprint()
+        Diagnostics.log("generate: seed \(seed) guidance "
+            + String(format: "%.1f", guidance) + " · " + Diagnostics.summary())
 
         // guidance > 1 needs the baked uncond embeds (txt_embeds_neg_fp32.bin)
         var ehsNeg: MLMultiArray?

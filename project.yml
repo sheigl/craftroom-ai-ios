@@ -9,8 +9,8 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5"
-    MARKETING_VERSION: "0.1.0"
-    CURRENT_PROJECT_VERSION: "1"
+    MARKETING_VERSION: "0.2.0"
+    CURRENT_PROJECT_VERSION: "2"
     TARGETED_DEVICE_FAMILY: "2"          # iPad
     IPHONEOS_DEPLOYMENT_TARGET: "17.0"
 targets:
@@ -38,3 +38,8 @@ targets:
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
         NSPhotoLibraryUsageDescription: "Craft Room AI reads one photo you pick, to turn it into a coloring page. Everything stays on this iPad."
+        # Diagnostics reachability (Diagnostics.swift writes Documents/phaseA.log):
+        # on-device runs have no console, and a jetsam kill leaves no crash
+        # report, so the log must be pullable from Finder.
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true

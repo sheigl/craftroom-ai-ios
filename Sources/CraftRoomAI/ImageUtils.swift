@@ -1,34 +1,33 @@
 import UIKit
 
-/// Center-crop to the 3:2 reference aspect, bake EXIF orientation, rescale to
-/// 1248x832, and hand the VAE [-1,1] CHW floats.
+/// Aspect-fill crop to the 3:2 reference aspect, bake EXIF orientation, rescale
+/// to 1248x832 — in ONE draw — and hand the VAE [-1,1] CHW floats.
 enum ImageUtils {
     static func normalizedPixels(_ image: UIImage) throws -> [Float] {
-        // 1. bake orientation (EXIF) into upright pixels at native size
-        let native = image.size
-        guard native.width > 0, native.height > 0 else {
+        let w = Geo.photoW, h = Geo.photoH
+        let iw = image.size.width, ih = image.size.height
+        guard iw > 0, ih > 0 else {
             throw PipError.image("zero-size image")
         }
+
+        // ONE draw at the target size: centre aspect-fill + EXIF bake +
+        // downscale. The earlier path first rendered the photo at its NATIVE
+        // size (a 48 MP import = ~195 MB, then a second crop copy), which
+        // jetsam-killed the app as soon as the 3.7 GB int8 DiT was resident —
+        // large photos crashed, small ones survived. This costs ~4 MB for any
+        // input, so photo size no longer affects peak memory.
         let fmt = UIGraphicsImageRendererFormat.default()
         fmt.opaque = true
-        let upright = UIGraphicsImageRenderer(size: native, format: fmt).image { _ in
-            image.draw(in: CGRect(origin: .zero, size: native))
+        let scale = max(CGFloat(w) / iw, CGFloat(h) / ih)
+        let dw = iw * scale, dh = ih * scale
+        let upright = UIGraphicsImageRenderer(size: CGSize(width: w, height: h),
+                                             format: fmt).image { _ in
+            image.draw(in: CGRect(x: (CGFloat(w) - dw) / 2,
+                                  y: (CGFloat(h) - dh) / 2,
+                                  width: dw, height: dh))
         }
         guard let src = upright.cgImage else { throw PipError.image("no CGImage") }
 
-        // 2. center-crop to 1248:832
-        let aspect = CGFloat(Geo.photoW) / CGFloat(Geo.photoH)
-        let srcW = CGFloat(src.width), srcH = CGFloat(src.height)
-        var cropW = srcW, cropH = srcH
-        if srcW / srcH > aspect { cropW = srcH * aspect } else { cropH = srcW / aspect }
-        let cropRect = CGRect(x: (srcW - cropW) / 2, y: (srcH - cropH) / 2,
-                              width: cropW, height: cropH)
-        guard let cropped = src.cropping(to: cropRect) else {
-            throw PipError.image("crop failed")
-        }
-
-        // 3. rescale to the export shape
-        let w = Geo.photoW, h = Geo.photoH
         guard let cs = CGColorSpace(name: CGColorSpace.sRGB),
               let ctx = CGContext(data: nil, width: w, height: h,
                                   bitsPerComponent: 8, bytesPerRow: w * 4,
@@ -38,13 +37,13 @@ enum ImageUtils {
             throw PipError.image("no context")
         }
         ctx.interpolationQuality = .high
-        ctx.draw(cropped, in: CGRect(x: 0, y: 0, width: CGFloat(w), height: CGFloat(h)))
+        ctx.draw(src, in: CGRect(x: 0, y: 0, width: CGFloat(w), height: CGFloat(h)))
         guard let raw = ctx.data else { throw PipError.image("scale failed") }
         let bytes = [UInt8](UnsafeBufferPointer(
             start: raw.bindMemory(to: UInt8.self, capacity: w * h * 4), count: w * h * 4))
         guard bytes.count >= w * h * 4 else { throw PipError.image("short bitmap") }
 
-        // 4. CHW, [-1,1]
+        // CHW, [-1,1]
         let wh = w * h
         var chw = [Float](repeating: 0, count: 3 * wh)
         for i in 0..<wh {
