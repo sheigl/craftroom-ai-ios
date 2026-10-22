@@ -11,8 +11,13 @@ certificate lifetime and a 3-app-ID quota.
   the iPad plugged into power during install + first launch.
 
 ## 1. Get the ipa (on the Mac)
-Download the `CraftRoomAI-unsigned-ipa` artifact from the Actions run
-(the zip contains `CraftRoomAI-unsigned.ipa.part-aa`, `-ab`, ...), then:
+
+A verified build already exists (2026-10-22) on the build box at
+`/home/sheigl/code/craftroom-ios/dist/CraftRoomAI-unsigned.ipa`
+(3,555,393,652 B, sha256 `8ebd16de…ee4cb9`) — copy that one file over and skip
+to step 2. To build fresh instead, download the `CraftRoomAI-unsigned-ipa`
+artifact from the Actions run (the zip contains
+`CraftRoomAI-unsigned.ipa.part-aa`, `-ab`, ...), then:
 
 ```
 mkdir ipa && mv CraftRoomAI-unsigned.ipa.part-* ipa/
