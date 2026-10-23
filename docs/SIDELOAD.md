@@ -12,10 +12,15 @@ certificate lifetime and a 3-app-ID quota.
 
 ## 1. Get the ipa (on the Mac)
 
-A verified build already exists (2026-10-22) on the build box at
-`/home/sheigl/code/craftroom-ios/dist/CraftRoomAI-unsigned.ipa`
-(3,555,393,652 B, sha256 `8ebd16de…ee4cb9`) — copy that one file over and skip
-to step 2. To build fresh instead, download the `CraftRoomAI-unsigned-ipa`
+A verified build already exists (v0.3.0, 2026-10-23) **on the Mac** at
+`~/Downloads/CraftRoomAI-0.3.0.ipa` (3,555,414,479 B, sha256
+`81948e50…360f1e3`) — skip to step 2. Its header must read `v0.3.0 (3)`;
+anything else is an older install. The pre-0.3.0 file that was here
+(`CraftRoomAI-unsigned.ipa`, header `v1.0`) is kept on the Mac as
+`CraftRoomAI-OLD-broken-v1.0.ipa`: it shipped XcodeGen's default Info.plist
+(no `UIFileSharingEnabled`, so no Documents folder in Files, and a version
+string that lied). To build fresh instead, download the
+`CraftRoomAI-unsigned-ipa`
 artifact from the Actions run (the zip contains
 `CraftRoomAI-unsigned.ipa.part-aa`, `-ab`, ...), then:
 
