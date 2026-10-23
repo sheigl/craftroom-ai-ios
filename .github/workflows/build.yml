@@ -61,6 +61,22 @@ jobs:
       - name: Generate project
         run: xcodegen generate
 
+      # A silently-defaulted Info.plist shipped once (v0.2.0 read 1.0 (1), no
+      # UIFileSharingEnabled, iPhone+iPad family): the app ran, but Documents/
+      # was unreachable from Files and the build id lied. Print what XcodeGen
+      # wrote and fail here, not on the iPad.
+      - name: Verify generated Info.plist
+        run: |
+          set -euo pipefail
+          echo "--- Support/Info.plist ---"
+          /usr/libexec/PlistBuddy -c Print Support/Info.plist
+          echo "--- project settings that must reach it ---"
+          grep -E "MARKETING_VERSION|INFOPLIST_FILE|TARGETED_DEVICE_FAMILY" \
+            CraftRoomAI.xcodeproj/project.pbxproj | sort -u || true
+          if ! /usr/libexec/PlistBuddy -c "Print :UIFileSharingEnabled" Support/Info.plist; then
+            echo "::warning::XcodeGen did not emit UIFileSharingEnabled — the packaging step repairs it"
+          fi
+
       - name: Build (unsigned, arm64 device)
         run: |
           set -euo pipefail
@@ -82,6 +98,26 @@ jobs:
           set -euo pipefail
           app=$(find build -type d -name 'CraftRoomAI.app' | head -n 1)
           test -n "$app"
+          VERSION=$(awk -F'"' '/MARKETING_VERSION/{print $2; exit}' project.yml)
+          BUILD=$(awk -F'"' '/CURRENT_PROJECT_VERSION/{print $2; exit}' project.yml)
+          echo "target version: $VERSION ($BUILD)"
+          # Repair, then assert. The bundle is unsigned here (Sideloadly signs
+          # it later), so editing the built plist is safe — and it makes the
+          # shipped identity and the Files-folder exposure deterministic even
+          # if XcodeGen's info block silently fails to apply.
+          PB=/usr/libexec/PlistBuddy
+          for key in UIFileSharingEnabled LSSupportsOpeningDocumentsInPlace; do
+            $PB -c "Delete :$key" "$app/Info.plist" 2>/dev/null || true
+            $PB -c "Add :$key bool true" "$app/Info.plist"
+          done
+          $PB -c "Set :CFBundleShortVersionString $VERSION" "$app/Info.plist"
+          $PB -c "Set :CFBundleVersion $BUILD" "$app/Info.plist"
+          $PB -c "Set :CFBundleDisplayName Craft Room AI" "$app/Info.plist"
+          echo "--- built app Info.plist (key subset) ---"
+          for key in CFBundleShortVersionString CFBundleVersion CFBundleDisplayName \
+                     UIFileSharingEnabled LSSupportsOpeningDocumentsInPlace; do
+            printf '%-32s = %s\n' "$key" "$($PB -c "Print :$key" "$app/Info.plist")"
+          done
           mkdir -p Payload
           # NOTE: ditto SRC DST copies SRC's CONTENTS into an existing DST —
           # the app bundle must be spelled out, or the ipa ships a flattened

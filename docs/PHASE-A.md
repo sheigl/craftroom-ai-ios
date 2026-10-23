@@ -55,24 +55,39 @@ it out — compare to the g3.0 B65 arm in eval/sheet_ladder.png).
   refuses loudly if it is missing.
 - First run per model set recompiles — the load line, not the loop line.
 
-## When it fails: reading the evidence (0.2.0+)
+## When it fails: reading the evidence (0.3.0+)
 
 The iPad has no console and a memory kill leaves no crash report, so the app
-carries its own record:
+carries its own record and shows it on screen:
 
-- **Header line** under the title: `v0.2.0 (2) · <hw.machine> · iPadOS <ver> ·
-  <RAM> MB RAM · <free> free · footprint <MB>`. Screenshot that first — it
-  answers "which chip, which OS, how much headroom".
-- **`Documents/phaseA.log`** — written as the run proceeds: the header summary,
-  one line per stage, a line every 5 diffusion steps (milliseconds, footprint,
-  free MB), and the exact error. Pull it with Finder → iPad → *Craft Room AI* →
-  phaseA.log (UIFileSharingEnabled), or from the Files app on the device. After
-  a crash it ends at the last thing that ran, which is the whole point.
+- **Header line** under the title: `v0.3.0 (3) · <hw.machine> · iPadOS <ver> ·
+  <RAM> MB RAM · <free> free · footprint <MB>`. Screenshot that first.
+- **Memory verdict line** right under it, in red when the numbers cannot work:
+  `<hw.machine> · <RAM> MB RAM · app budget <free> MB · weights <size> MB →
+  plausible | IMPOSSIBLE (would be a silent kill)`. The weights figure is read
+  from the installed payload (`*.mlmodelc/weights/weight.bin`), not assumed.
+- **Log panel** at the bottom of the screen — the tail of
+  `Documents/phaseA.log`, with **Reload** and **Copy**. Use this when the Files
+  folder is unavailable: a screenshot of the tail is the evidence. The file is
+  still written (and closed) after every line, so a kill leaves it complete.
+  Saved copy: Files → On My iPad → *Craft Room AI* → `phaseA.log`.
 - **Errors name the model and the compute-unit set**, e.g.
   `Loading models (All (ANE+GPU))… failed: dit_int8 [All (ANE+GPU)]: <CoreML
-  message>`. If a set cannot build a plan, the app now degrades to
-  **CPU+GPU** and then **CPU only** automatically, and the stats card's
-  `units:` line reports the set that actually ran — compare it to the picker.
+  message>`.
+
+### One compute-unit set per launch (0.3.0)
+
+0.2.0 degraded `All → CPU+GPU → CPU only` inside one process. On device that
+turned a recoverable plan refusal into a silent kill: each attempt maps the
+3.9 GB weight file again and the failed plan's pages are not returned first.
+0.3.0 makes **one** attempt, on the set you picked, and never retries by
+itself. To test another set, change the picker and tap Generate again (the
+engine drops the models when the set changes) — or relaunch if a kill left the
+process dirty.
+
+`Load even if the preflight says impossible` is **on** by default: a kill still
+leaves the budget-vs-weights line in the log, so attempting is the measurement.
+Turn it off to make the preflight stop the run instead (safe mode).
 
 ### The -14 class of failure
 
@@ -82,9 +97,13 @@ CoreML plan-build refusal. Two causes matter here:
 1. **OS too old for the mlprogram spec.** The shipped DiT is
    `specificationVersion 8` (= iPadOS/iOS **18**), even though the export asked
    for iOS17 — the unquantized probe is spec 8 too, so it is the conversion,
-   not the int8 quantization. On an iPadOS 17 device this refuses to load; the
-   fix is to update the iPad, or re-export the DiT at spec 7 on desktop2 and
-   re-upload the payload.
-2. **ANE cannot plan this shape/quantization.** Then the CPU+GPU (or CPU only)
-   fallback should load and run — if it does, the timing row to report is that
-   fallback's, and the ANE arm is a Phase B problem, not a Phase A blocker.
+   not the int8 quantization. The test iPad is on iPadOS 26.6.6, so **this
+   cause is ruled out** for it.
+2. **The device refuses this plan** (ANE or GPU cannot adopt a 4B int8
+   transformer). With 0.3.0 this is visible per set: pick `CPU only` and try
+   again. If CPU-only loads and runs, the timing row to report is that one, and
+   the ANE/GPU arms are a Phase B problem.
+3. **The process is killed instead of refused** (app vanishes, no error text).
+   That is memory, not planning: iOS kills the process when the weights do not
+   fit the per-app budget. The log's `load:` line and the on-screen verdict
+   already hold the two numbers; compare them.

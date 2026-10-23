@@ -13,6 +13,16 @@ struct ContentView: View {
     // ladder verdict: guidance 3.0 is the ship setting (2.0 fallback); the
     // picker lets one device run measure 1.0 (30 forwards) vs 3.0 (60 forwards)
     @State private var guidance: Double = 3.0
+    /// Default ON: a kill still leaves the budget-vs-weights line in the log,
+    /// which IS the measurement — so we attempt and log rather than refuse.
+    /// Turning it off makes the preflight stop the run instead (safe mode for
+    /// a demo where a crash would be embarrassing).
+    @State private var forceLoad = true
+    /// Tail of Documents/phaseA.log, shown on screen so the evidence never
+    /// depends on the Files folder being exposed.
+    @State private var logText = ""
+    /// Precomputed once (it stats every bundled weight file).
+    @State private var verdict = ""
     /// Last pipeline stage reached — an error is reported against it, and a
     /// kill leaves it in phaseA.log.
     @State private var stage = "start"
@@ -28,6 +38,12 @@ struct ContentView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
+                if !verdict.isEmpty {
+                    Text(verdict)
+                        .font(.caption.bold())
+                        .foregroundStyle(verdict.contains("IMPOSSIBLE") ? Color.red : Color.secondary)
+                        .textSelection(.enabled)
+                }
 
                 controls
                 Text(status)
@@ -48,6 +64,7 @@ struct ContentView: View {
                         .font(.system(.body, design: .monospaced))
                         .textSelection(.enabled)
                 }
+                logPanel
             }
             .padding()
         }
@@ -58,6 +75,31 @@ struct ContentView: View {
                 stats = ""
                 status = "Photo ready. Tap Generate."
             }
+        }
+        .task {
+            verdict = Diagnostics.memoryVerdict()
+            logText = Diagnostics.tail()
+        }
+    }
+
+    /// The log tail, on screen. A screenshot of this is enough to diagnose a
+    /// run, which matters because the Files folder depends on a correct
+    /// Info.plist (see the v0.3.0 packaging fix).
+    private var logPanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Log")
+                    .font(.headline)
+                Spacer()
+                Button("Reload") { logText = Diagnostics.tail() }
+                    .buttonStyle(.bordered)
+                Button("Copy") { UIPasteboard.general.string = logText }
+                    .buttonStyle(.bordered)
+            }
+            Text(logText)
+                .font(.system(.caption, design: .monospaced))
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
@@ -89,6 +131,8 @@ struct ContentView: View {
             }
             .pickerStyle(.segmented)
             .disabled(running)
+            Toggle("Load even if the preflight says impossible", isOn: $forceLoad)
+                .disabled(running)
             HStack {
                 Text("Seed")
                 TextField("seed", text: $seedText)
@@ -121,6 +165,7 @@ struct ContentView: View {
         stage = "start"
         let units = self.units
         let guidance = self.guidance
+        let force = self.forceLoad
         Diagnostics.reset("run on \(units.rawValue) guidance \(String(format: "%.1f", guidance))"
             + " seed \(seed) photo \(Int(photo.size.width))x\(Int(photo.size.height))")
         Task.detached(priority: .userInitiated) {
@@ -139,12 +184,14 @@ struct ContentView: View {
                 let (img, s) = try await engine.run(units: units, photo: photo,
                                                     seed: seed,
                                                     guidance: Float(guidance),
+                                                    forceLoad: force,
                                                     onStage: stageSink)
                 await MainActor.run {
                     running = false
                     result = img
                     status = "Done."
                     stats = Self.format(s)
+                    logText = Diagnostics.tail()
                 }
             } catch {
                 let msg = error.localizedDescription
@@ -153,6 +200,7 @@ struct ContentView: View {
                 await MainActor.run {
                     running = false
                     status = "\(failedAt) failed: \(msg)"
+                    logText = Diagnostics.tail()
                 }
             }
         }
@@ -191,12 +239,12 @@ final class Engine {
     private var lastLoad: Double = 0
 
     func run(units: ComputeUnitsOption, photo: UIImage, seed: UInt64,
-             guidance: Float,
+             guidance: Float, forceLoad: Bool,
              onStage: @escaping (String) -> Void) throws -> (UIImage, RunStats) {
         if inference == nil || loadedUnits != units {
             onStage("Loading models (\(units.rawValue))…")
             let inf = try Inference()
-            let load = try inf.loadModels(units: units)
+            let load = try inf.loadModels(units: units, force: forceLoad)
             inference = inf
             loadedUnits = units
             lastLoad = load

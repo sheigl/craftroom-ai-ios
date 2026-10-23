@@ -72,7 +72,50 @@ enum Diagnostics {
 
     static func reset(_ header: String) {
         let line = "=== \(Date()) \(build) \(header)\n" + summary() + "\n"
+            + memoryVerdict() + "\n"
         if let d = line.data(using: .utf8) { try? d.write(to: logURL) }
+    }
+
+    /// Bytes of CoreML weights shipped inside the bundle. This is the number
+    /// that has to fit the app's jetsam budget, and it is read from the actual
+    /// installed payload rather than assumed from the build log.
+    static func bundledWeightBytes() -> UInt64 {
+        guard let res = Bundle.main.resourceURL,
+              let walk = FileManager.default.enumerator(
+                at: res, includingPropertiesForKeys: [.fileSizeKey]) else { return 0 }
+        var total: UInt64 = 0
+        for case let url as URL in walk where url.lastPathComponent == "weight.bin" {
+            let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            total += UInt64(max(0, size))
+        }
+        return total
+    }
+
+    /// The verdict line the Phase A gate actually needs: how much room the OS
+    /// is willing to give this process next to the bytes we want to map.
+    static func memoryVerdict() -> String {
+        let weights = Double(bundledWeightBytes()) / 1_048_576.0
+        let budget = availableMemoryMB()
+        let total = physicalMemoryMB()
+        guard let budget else {
+            return String(format: "%.0f MB RAM · headroom n/a", total)
+        }
+        let fits = budget >= weights + 320
+        return String(format: "%@ · %.0f MB RAM · app budget %.0f MB · weights %.0f MB"
+            + " → %@",
+            machine, total, budget, weights,
+            fits ? "plausible" : "IMPOSSIBLE (would be a silent kill)")
+    }
+
+    /// Last lines of the log, for the on-screen panel: file sharing is not
+    /// guaranteed to survive a mis-generated Info.plist, and a screenshot of
+    /// the tail is the one evidence path that always works.
+    static func tail(_ maxLines: Int = 60) -> String {
+        guard let s = try? String(contentsOf: logURL, encoding: .utf8) else {
+            return "(no log yet — tap Generate once)"
+        }
+        let lines = s.split(separator: "\n", omittingEmptySubsequences: false)
+        return lines.suffix(maxLines).joined(separator: "\n")
     }
 
     /// Append one timestamped line. Never throws; called from the pipeline so

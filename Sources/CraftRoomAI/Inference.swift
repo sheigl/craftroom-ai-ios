@@ -48,52 +48,51 @@ final class Inference {
     private var dit: MLModel?
     private var vaeEnc: MLModel?
     private var vaeDec: MLModel?
-    /// The compute-unit set that actually loaded; differs from the requested one
-    /// when a plan build failed and the run degraded (see loadModels).
+    /// The compute-unit set that actually loaded. v0.3.0 no longer degrades
+    /// inside a process (see loadModels), so this is the requested set.
     private(set) var effectiveUnits: ComputeUnitsOption = .all
 
     init() throws {
         payload = try Payload.load()
     }
 
-    // MARK: models
-
+    /// Loads the three models on ONE compute-unit set, with a memory preflight.
+    ///
+    /// v0.2.0 degraded All -> CPU+GPU -> CPU only inside a single process. On
+    /// device that turned a recoverable plan-build refusal (-14 on the ANE
+    /// plan) into a silent kill: each attempt maps 3.9 GB of weights again and
+    /// the failed plan's pages are not returned before the next attempt. So the
+    /// retry is gone — one attempt per launch, and the caller switches units by
+    /// relaunching or by choosing a different set (Engine drops the models).
     @discardableResult
-    func loadModels(units: ComputeUnitsOption) throws -> Double {
+    func loadModels(units: ComputeUnitsOption, force: Bool = false) throws -> Double {
         let t0 = Date()
-        // A CoreML plan-build failure ("failed to build model execution plan",
-        // code -14) is compute-unit specific in practice: an int8 plan the ANE
-        // refuses can still build on the GPU. Degrade through the remaining sets
-        // instead of failing the whole run, and keep what worked so the stats
-        // card reports the set that really ran.
-        var candidates: [ComputeUnitsOption] = [units]
-        for c in [ComputeUnitsOption.cpuAndGPU, .cpuOnly] where !candidates.contains(c) {
-            candidates.append(c)
+        let weightsMB = Double(Diagnostics.bundledWeightBytes()) / 1_048_576.0
+        let headroom = Diagnostics.availableMemoryMB()
+        let headText = headroom.map { String(format: "%.0f", $0) } ?? "n/a"
+        Diagnostics.log(String(format: "load: %@ · weights %.0f MB · headroom %@ MB · force %@",
+                               units.rawValue, weightsMB, headText, force ? "yes" : "no"))
+        // Safe mode (the UI toggle is off): refusing leaves the numbers on
+        // screen. With the toggle on — the default — we attempt anyway,
+        // because a kill also leaves this line in the log.
+        if !force, let h = headroom, h < weightsMB + 320 {
+            throw PipError.model(String(format:
+                "memory preflight: app budget %.0f MB < weights %.0f MB + 320 MB. "
+                + "Load skipped ('load even if impossible' is off). "
+                + "Turn it on to attempt the load anyway.", h, weightsMB))
         }
-        var lastError: Error?
-        for cand in candidates {
-            do {
-                let t = Date()
-                dit = try Self.loadModel(named: "dit_int8", units: cand)
-                Diagnostics.log("dit_int8 loaded on \(cand.rawValue) in "
-                    + String(format: "%.1f", Date().timeIntervalSince(t)) + " s")
-                vaeEnc = try Self.loadModel(named: "vae_encoder_land_1248x832", units: cand)
-                vaeDec = try Self.loadModel(named: "vae_decoder", units: cand)
-                effectiveUnits = cand
-                if cand != units {
-                    Diagnostics.log("NOTE: \(units.rawValue) failed to load — running on \(cand.rawValue)")
-                }
-                return Date().timeIntervalSince(t0)
-            } catch {
-                lastError = error
-                Diagnostics.log("load failed on \(cand.rawValue): \(error.localizedDescription)")
-                dit = nil
-                vaeEnc = nil
-                vaeDec = nil
-            }
-        }
-        if let lastError { throw lastError }
-        throw PipError.model("no compute-unit set could load the models")
+        let t = Date()
+        dit = try Self.loadModel(named: "dit_int8", units: units)
+        Diagnostics.log("dit_int8 loaded on \(units.rawValue) in "
+            + String(format: "%.1f", Date().timeIntervalSince(t))
+            + String(format: " s · footprint %.0f MB · free %.0f MB",
+                     Diagnostics.footprintMB(), headroom ?? 0))
+        vaeEnc = try Self.loadModel(named: "vae_encoder_land_1248x832", units: units)
+        vaeDec = try Self.loadModel(named: "vae_decoder", units: units)
+        Diagnostics.log(String(format: "all models loaded · footprint %.0f MB",
+                               Diagnostics.footprintMB()))
+        effectiveUnits = units
+        return Date().timeIntervalSince(t0)
     }
 
     /// Loads one bundled model, re-labelling any failure with the model name and
