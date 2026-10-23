@@ -25,8 +25,17 @@ targets:
         buildPhase: resources
     info:
       path: Support/Info.plist
-      props:
+      # NOTE: the key is `properties`, not `props`. `props` parses as an
+      # unknown key and is silently dropped, which is why every build up to
+      # 0.3.0 shipped XcodeGen's bare default plist: version 1.0 (1), no
+      # display name, no UIFileSharingEnabled (no Documents folder in Files),
+      # no launch screen or orientations (two build warnings).
+      properties:
         CFBundleDisplayName: Craft Room AI
+        # Resolved from the build settings above, so the header on the iPad
+        # matches the tag that was built.
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait

@@ -106,18 +106,31 @@ jobs:
           # shipped identity and the Files-folder exposure deterministic even
           # if XcodeGen's info block silently fails to apply.
           PB=/usr/libexec/PlistBuddy
-          for key in UIFileSharingEnabled LSSupportsOpeningDocumentsInPlace; do
-            $PB -c "Delete :$key" "$app/Info.plist" 2>/dev/null || true
-            $PB -c "Add :$key bool true" "$app/Info.plist"
-          done
-          $PB -c "Set :CFBundleShortVersionString $VERSION" "$app/Info.plist"
-          $PB -c "Set :CFBundleVersion $BUILD" "$app/Info.plist"
-          $PB -c "Set :CFBundleDisplayName Craft Room AI" "$app/Info.plist"
+          # Add-or-set: PlistBuddy's `Set` fails on a key that is absent, which
+          # is exactly the state a dropped `properties` block leaves behind.
+          set_str() {
+            $PB -c "Set :$1 $2" "$3" 2>/dev/null \
+              || $PB -c "Add :$1 string $2" "$3"
+          }
+          set_bool() {
+            $PB -c "Set :$1 $2" "$3" 2>/dev/null \
+              || $PB -c "Add :$1 bool $2" "$3"
+          }
+          set_bool UIFileSharingEnabled true "$app/Info.plist"
+          set_bool LSSupportsOpeningDocumentsInPlace true "$app/Info.plist"
+          set_str CFBundleShortVersionString "$VERSION" "$app/Info.plist"
+          set_str CFBundleVersion "$BUILD" "$app/Info.plist"
+          set_str CFBundleDisplayName "Craft Room AI" "$app/Info.plist"
           echo "--- built app Info.plist (key subset) ---"
           for key in CFBundleShortVersionString CFBundleVersion CFBundleDisplayName \
                      UIFileSharingEnabled LSSupportsOpeningDocumentsInPlace; do
             printf '%-32s = %s\n' "$key" "$($PB -c "Print :$key" "$app/Info.plist")"
           done
+          # Hard gate: a wrong plist already cost a device round-trip.
+          test "$($PB -c "Print :CFBundleShortVersionString" "$app/Info.plist")" = "$VERSION"
+          test "$($PB -c "Print :CFBundleVersion" "$app/Info.plist")" = "$BUILD"
+          test "$($PB -c "Print :UIFileSharingEnabled" "$app/Info.plist")" = "true"
+          test "$($PB -c "Print :LSSupportsOpeningDocumentsInPlace" "$app/Info.plist")" = "true"
           mkdir -p Payload
           # NOTE: ditto SRC DST copies SRC's CONTENTS into an existing DST —
           # the app bundle must be spelled out, or the ipa ships a flattened
