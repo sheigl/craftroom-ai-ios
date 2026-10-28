@@ -1,0 +1,101 @@
+{
+ "version": "device-v1",
+ "models": [
+  "dit_int8.mlmodelc",
+  "vae_decoder.mlmodelc",
+  "vae_encoder_land_1248x832.mlmodelc"
+ ],
+ "files": [
+  {
+   "path": "dit_int8.mlmodelc/analytics/coremldata.bin",
+   "size": 243,
+   "sha256": "61d2dd06efb6278b23beed488cb030381451c8b90ae09f1b689483639f82c259",
+   "url": "https://huggingface.co/sheigl/craftroom-ai-payload/resolve/main/device-v1/dit_int8.mlmodelc/analytics/coremldata.bin"
+  },
+  {
+   "path": "dit_int8.mlmodelc/coremldata.bin",
+   "size": 512,
+   "sha256": "d740ba6bd457151b54f513cfd9ad09e78af6efd66a2a5cc058d4b9cea6dde742",
+   "url": "https://huggingface.co/sheigl/craftroom-ai-payload/resolve/main/device-v1/dit_int8.mlmodelc/coremldata.bin"
+  },
+  {
+   "path": "dit_int8.mlmodelc/metadata.json",
+   "size": 3527,
+   "sha256": "ae64bdad503093ddcbae81beea680a542182934cda2049623116a17e74128bc9",
+   "url": "https://huggingface.co/sheigl/craftroom-ai-payload/resolve/main/device-v1/dit_int8.mlmodelc/metadata.json"
+  },
+  {
+   "path": "dit_int8.mlmodelc/model.mil",
+   "size": 768949,
+   "sha256": "bb326a66ca7296f828c48bbc8fb97af3dc0e0ed23fae698f455ac194368d3c19",
+   "url": "https://huggingface.co/sheigl/craftroom-ai-payload/resolve/main/device-v1/dit_int8.mlmodelc/model.mil"
+  },
+  {
+   "path": "dit_int8.mlmodelc/weights/weight.bin",
+   "size": 3877800064,
+   "sha256": "b6dbd496893358efb60e2b94392f705e9a5ddb827e7645002822bd223dd81915",
+   "url": "https://huggingface.co/sheigl/craftroom-ai-payload/resolve/main/device-v1/dit_int8.mlmodelc/weights/weight.bin"
+  },
+  {
+   "path": "vae_decoder.mlmodelc/analytics/coremldata.bin",
+   "size": 243,
+   "sha256": "347223b9137927a11f01338396e2211df7856e914f95268bcdd589d603069540",
+   "url": "https://huggingface.co/sheigl/craftroom-ai-payload/resolve/main/device-v1/vae_decoder.mlmodelc/analytics/coremldata.bin"
+  },
+  {
+   "path": "vae_decoder.mlmodelc/coremldata.bin",
+   "size": 386,
+   "sha256": "4bda725b0e58f56742ee6a9adf4de5f310daf32843af2f7dde2532e5e0fa6100",
+   "url": "https://huggingface.co/sheigl/craftroom-ai-payload/resolve/main/device-v1/vae_decoder.mlmodelc/coremldata.bin"
+  },
+  {
+   "path": "vae_decoder.mlmodelc/metadata.json",
+   "size": 1970,
+   "sha256": "0308b0adc3ca435fd9dad23c9da9d22e5a363e32854d9e20610387ffd7472aab",
+   "url": "https://huggingface.co/sheigl/craftroom-ai-payload/resolve/main/device-v1/vae_decoder.mlmodelc/metadata.json"
+  },
+  {
+   "path": "vae_decoder.mlmodelc/model.mil",
+   "size": 194247,
+   "sha256": "519bade105a9685318511561b45af2ebd61075ae15cd4a82b2886eff76d92f4a",
+   "url": "https://huggingface.co/sheigl/craftroom-ai-payload/resolve/main/device-v1/vae_decoder.mlmodelc/model.mil"
+  },
+  {
+   "path": "vae_decoder.mlmodelc/weights/weight.bin",
+   "size": 99253440,
+   "sha256": "0ee3e3f351299169481bdc4cea5841a8bee1c30d3a3cee64a6ffdb47c6420d4a",
+   "url": "https://huggingface.co/sheigl/craftroom-ai-payload/resolve/main/device-v1/vae_decoder.mlmodelc/weights/weight.bin"
+  },
+  {
+   "path": "vae_encoder_land_1248x832.mlmodelc/analytics/coremldata.bin",
+   "size": 243,
+   "sha256": "e7e872eec8d7a36ddca739ed98ca75ca7046dfd8ff474716175316a8d3578c5a",
+   "url": "https://huggingface.co/sheigl/craftroom-ai-payload/resolve/main/device-v1/vae_encoder_land_1248x832.mlmodelc/analytics/coremldata.bin"
+  },
+  {
+   "path": "vae_encoder_land_1248x832.mlmodelc/coremldata.bin",
+   "size": 383,
+   "sha256": "02b0b7373b3e0a39cae426f4d11355c7fccb8d1d1e73c48f91539eba4c18dbe7",
+   "url": "https://huggingface.co/sheigl/craftroom-ai-payload/resolve/main/device-v1/vae_encoder_land_1248x832.mlmodelc/coremldata.bin"
+  },
+  {
+   "path": "vae_encoder_land_1248x832.mlmodelc/metadata.json",
+   "size": 1992,
+   "sha256": "3822cd1025ca10dce0ca72389cfe657dcec844261db6b1a395d995334f77dd70",
+   "url": "https://huggingface.co/sheigl/craftroom-ai-payload/resolve/main/device-v1/vae_encoder_land_1248x832.mlmodelc/metadata.json"
+  },
+  {
+   "path": "vae_encoder_land_1248x832.mlmodelc/model.mil",
+   "size": 149497,
+   "sha256": "06c809b17e994a16c50ba502bf63e7849a3cc17dff6ec1adb24eb0f364bf0ef8",
+   "url": "https://huggingface.co/sheigl/craftroom-ai-payload/resolve/main/device-v1/vae_encoder_land_1248x832.mlmodelc/model.mil"
+  },
+  {
+   "path": "vae_encoder_land_1248x832.mlmodelc/weights/weight.bin",
+   "size": 68862656,
+   "sha256": "78c671d7e422d5d81f314747a7d76873184415fd029d070bae9235f38aa6a334",
+   "url": "https://huggingface.co/sheigl/craftroom-ai-payload/resolve/main/device-v1/vae_encoder_land_1248x832.mlmodelc/weights/weight.bin"
+  }
+ ],
+ "totalBytes": 4047038352
+}
