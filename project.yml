@@ -17,6 +17,13 @@ targets:
   CraftRoomAI:
     type: application
     platform: iOS
+    settings:
+      base:
+        # TestFlight validates harder than the sideload path: without an app
+        # icon the upload is rejected (CFBundleIconName + 120/152 px checks).
+        # Single-size 1024 catalog (Xcode 14+); the build injects
+        # CFBundleIconName from this name.
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     sources:
       - path: Sources/CraftRoomAI
       - path: Resources/models
