@@ -194,9 +194,9 @@ final class PayloadStore: NSObject, URLSessionDownloadDelegate {
             .appendingPathComponent(UUID().uuidString + ".part")
         do {
             try FileManager.default.moveItem(at: location, to: keep)
-            continuation?.succeed(keep)
+            continuation?.resume(returning: keep)
         } catch {
-            continuation?.fail(error)
+            continuation?.resume(throwing: error)
         }
         continuation = nil
     }
@@ -204,7 +204,7 @@ final class PayloadStore: NSObject, URLSessionDownloadDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask,
                     didCompleteWithError error: Error?) {
         guard let error else { return }
-        continuation?.fail(error)
+        continuation?.resume(throwing: error)
         continuation = nil
     }
 }
