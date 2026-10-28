@@ -11,7 +11,7 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5"
-    MARKETING_VERSION: "0.4.0"
+    MARKETING_VERSION: "0.4.1"
     CURRENT_PROJECT_VERSION: "3"
     TARGETED_DEVICE_FAMILY: "2"          # iPad
     IPHONEOS_DEPLOYMENT_TARGET: "17.0"
@@ -31,6 +31,10 @@ targets:
       - path: Resources/bins
         buildPhase: resources
       - path: Resources/device
+        buildPhase: resources
+      # auto mode's synthetic photo (timing is content-independent; see
+      # ContentView.autoConfig)
+      - path: Resources/testphoto/test_photo.jpg
         buildPhase: resources
     info:
       path: Support/Info.plist

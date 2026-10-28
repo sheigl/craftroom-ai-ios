@@ -87,6 +87,7 @@ struct ContentView: View {
             verdict = Diagnostics.memoryVerdict()
             logText = Diagnostics.tail()
             payload = PayloadStore.shared.state
+            maybeStartAuto()
         }
     }
 
@@ -173,6 +174,7 @@ struct ContentView: View {
                 poll.cancel()
                 payload = .ready
                 verdict = Diagnostics.memoryVerdict()
+                maybeStartAuto()   // first-launch auto cell starts when the payload lands
                 status = "Models installed. Pick a photo to begin."
                 logText = Diagnostics.tail()
             } catch {
@@ -236,20 +238,90 @@ struct ContentView: View {
         }
     }
 
+    // MARK: auto mode (remote ladder driver)
+    //
+    // Launched via the developer tunnel with
+    //   --auto --units=all|cpu_gpu|cpu_only --guidance=1.0 --max-steps=2 --seed=0
+    // the harness picks the bundled test photo and runs a ladder cell with zero
+    // taps; timing results land as one AUTO-RESULT line in phaseA.log. Timing is
+    // content-independent (geometry is fixed), so the synthetic photo is fine.
+
+    private struct AutoConfig {
+        var units: ComputeUnitsOption
+        var guidance: Double
+        var seed: UInt64
+        var maxSteps: Int
+    }
+
+    @State private var autoStarted = false
+    @State private var autoWaitLogged = false
+
+    private func autoConfig() -> AutoConfig? {
+        let a = CommandLine.arguments
+        guard a.contains("--auto") else { return nil }
+        func val(_ key: String) -> String? {
+            guard let i = a.firstIndex(of: key), i + 1 < a.count else { return nil }
+            return a[i + 1]
+        }
+        let units: ComputeUnitsOption
+        switch val("--units") {
+        case "cpu_gpu":  units = .cpuAndGPU
+        case "cpu_only": units = .cpuOnly
+        default:         units = .all
+        }
+        return AutoConfig(
+            units: units,
+            guidance: Double(val("--guidance") ?? "3.0") ?? 3.0,
+            seed: UInt64(val("--seed") ?? "0") ?? 0,
+            maxSteps: max(1, min(30, Int(val("--max-steps") ?? "30") ?? 30)))
+    }
+
+    private func maybeStartAuto() {
+        guard !autoStarted, let ac = autoConfig() else { return }
+        guard case .ready = payload else {
+            if !autoWaitLogged {
+                autoWaitLogged = true
+                Diagnostics.log("auto: waiting for payload install")
+            }
+            return
+        }
+        autoStarted = true
+        guard let url = Bundle.main.url(forResource: "test_photo", withExtension: "jpg"),
+              let img = UIImage(contentsOfFile: url.path) else {
+            Diagnostics.log("ERROR auto: bundled test_photo.jpg missing")
+            return
+        }
+        run(preferredPhoto: img, preferredUnits: ac.units,
+            preferredGuidance: ac.guidance, preferredSeed: ac.seed,
+            maxSteps: ac.maxSteps)
+        // after run()'s Diagnostics.reset so the line survives into the log
+        Diagnostics.log("auto: units=\(ac.units.rawValue) guidance="
+            + String(format: "%.1f", ac.guidance) + " seed=\(ac.seed)"
+            + " max-steps=\(ac.maxSteps)")
+    }
+
     // MARK: run
 
-    private func run() {
-        guard let photo else { return }
-        let seed = UInt64(seedText.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+    // Optional preferred* args let auto-mode (launch args) drive a run with no
+    // taps; the button path passes nothing and reads UI state as before.
+    private func run(preferredPhoto: UIImage? = nil,
+                     preferredUnits: ComputeUnitsOption? = nil,
+                     preferredGuidance: Double? = nil,
+                     preferredSeed: UInt64? = nil,
+                     maxSteps: Int = 30) {
+        guard let photo = preferredPhoto ?? photo else { return }
+        let seed = preferredSeed
+            ?? UInt64(seedText.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
         running = true
         stats = ""
         status = "Starting…"
         stage = "start"
-        let units = self.units
-        let guidance = self.guidance
+        let units = preferredUnits ?? self.units
+        let guidance = preferredGuidance ?? self.guidance
         let force = self.forceLoad
         Diagnostics.reset("run on \(units.rawValue) guidance \(String(format: "%.1f", guidance))"
-            + " seed \(seed) photo \(Int(photo.size.width))x\(Int(photo.size.height))")
+            + " seed \(seed) photo \(Int(photo.size.width))x\(Int(photo.size.height))"
+            + (maxSteps < 30 ? " max-steps \(maxSteps)" : ""))
         Task.detached(priority: .userInitiated) {
             // boxed local: the same thread writes it in the sink and reads it in
             // the catch, and reading @State off-main would be unsound
@@ -267,13 +339,25 @@ struct ContentView: View {
                                                     seed: seed,
                                                     guidance: Float(guidance),
                                                     forceLoad: force,
-                                                    onStage: stageSink)
+                                                    onStage: stageSink,
+                                                    maxSteps: maxSteps)
                 await MainActor.run {
                     running = false
                     result = img
                     status = "Done."
                     stats = Self.format(s)
                     logText = Diagnostics.tail()
+                    if maxSteps < 30 || preferredUnits != nil {
+                        // one machine-readable line for the remote ladder reader
+                        let fw: Double = guidance > 1 ? 2 : 1
+                        let med = s.stepMillis.sorted()[max(0, s.stepMillis.count / 2 - 1)]
+                        Diagnostics.log("AUTO-RESULT units=\(s.units) guidance="
+                            + String(format: "%.1f", guidance)
+                            + " steps=\(s.stepMillis.count)"
+                            + " median_step_ms=" + String(format: "%.0f", med)
+                            + " median_forward_ms=" + String(format: "%.0f", med / fw)
+                            + " peak_mem_mb=" + String(format: "%.0f", s.peakMemMB))
+                    }
                 }
             } catch {
                 let msg = error.localizedDescription
@@ -322,7 +406,8 @@ final class Engine {
 
     func run(units: ComputeUnitsOption, photo: UIImage, seed: UInt64,
              guidance: Float, forceLoad: Bool,
-             onStage: @escaping (String) -> Void) throws -> (UIImage, RunStats) {
+             onStage: @escaping (String) -> Void,
+             maxSteps: Int = 30) throws -> (UIImage, RunStats) {
         if inference == nil || loadedUnits != units {
             onStage("Loading models (\(units.rawValue))…")
             let inf = try Inference()
@@ -333,7 +418,8 @@ final class Engine {
         }
         guard let inference else { throw PipError.model("engine not ready") }
         var (img, stats) = try inference.generate(from: photo, seed: seed,
-                                                  guidance: guidance, onStage: onStage)
+                                                  guidance: guidance, onStage: onStage,
+                                                  maxSteps: maxSteps)
         stats.modelLoad = lastLoad
         // report the set that actually ran, not the one requested (they differ
         // when a plan build failed and Inference degraded)

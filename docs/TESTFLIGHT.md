@@ -55,8 +55,29 @@ from Files → On My iPad → Craft Room AI, and pullable over USB with any AFC
 client — no Xcode, no developer pairing:
 
 ```bash
-pymobiledevice3 afc pull /Documents/phaseA.log ./phaseA.log
+~/pdm3/bin/pymobiledevice3 apps pull com.sheigl.CraftRoomAI \
+    /Documents/phaseA.log ./phaseA.log
 ```
 
 That is the whole feedback channel: build in CI, install via TestFlight, pull
 one text file back.
+
+## Auto mode (remote ladder cells)
+
+With a developer tunnel on the relay Mac
+(`sudo pymobiledevice3 remote start-tunnel`), the harness can be killed and
+relaunched with arguments, so measurement runs need zero taps on the iPad:
+
+```bash
+pymobiledevice3 developer dvt launch com.sheigl.CraftRoomAI --args \
+    --auto --units=cpu_gpu --guidance=1.0 --max-steps=2 --seed=0
+```
+
+`--units=all|cpu_gpu|cpu_only`, guidance/seed as shown, `--max-steps` 1–30.
+Auto mode uses the bundled synthetic `test_photo.jpg` (timing is
+content-independent — the pipeline geometry is fixed), and ends every
+successful cell with one machine-readable line in `phaseA.log`:
+
+```
+AUTO-RESULT units=CPU+GPU guidance=1.0 steps=2 median_step_ms=266000 median_forward_ms=266000 peak_mem_mb=4564
+```

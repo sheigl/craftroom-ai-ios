@@ -223,10 +223,13 @@ final class Inference {
 
     // MARK: the 30-step loop
 
+    /// maxSteps < 30 stops the loop early (auto-mode ladder cells measure
+    /// ms/forward and do not need the full schedule; the decoded image from a
+    /// truncated run is garbage on purpose).
     func denoise(noise: inout [Float], ref: [Float], hidden: MLMultiArray,
                  ehs: MLMultiArray, ehsNeg: MLMultiArray?, guidance: Float,
                  imgIds: MLMultiArray, txtIds: MLMultiArray,
-                 stats: inout RunStats) throws {
+                 stats: inout RunStats, maxSteps: Int = 30) throws {
         guard let dit = dit else { throw PipError.model("dit not loaded") }
         let hp = hidden.dataPointer.bindMemory(to: Float.self, capacity: hidden.count)
         let noiseCount = Geo.noiseTokens * Geo.tokenC
@@ -238,7 +241,7 @@ final class Inference {
 
         var stepMemPeak: UInt64 = 0
         stats.stepMillis.removeAll(keepingCapacity: true)
-        for i in 0..<30 {
+        for i in 0..<maxSteps {
             let t0 = Date()
             for k in 0..<noiseCount { hp[k] = noise[k] }
             tsp[0] = payload.sigmas[i]
@@ -275,7 +278,7 @@ final class Inference {
             }
             stats.stepMillis.append(Date().timeIntervalSince(t0) * 1000)
             stepMemPeak = max(stepMemPeak, currentFootprint())
-            if i % 5 == 0 || i == 29 {
+            if i % 5 == 0 || i == maxSteps - 1 {
                 let free = Diagnostics.availableMemoryMB()
                     .map { String(format: "%.0f", $0) } ?? "n/a"
                 Diagnostics.log("step \(i + 1)/30 "
@@ -341,7 +344,8 @@ final class Inference {
     // MARK: run
 
     func generate(from image: UIImage, seed: UInt64, guidance: Float = 3.0,
-                  onStage: ((String) -> Void)? = nil) throws -> (UIImage, RunStats) {
+                  onStage: ((String) -> Void)? = nil,
+                  maxSteps: Int = 30) throws -> (UIImage, RunStats) {
         var s = RunStats()
         let t0 = Date()
         var memPeak: UInt64 = currentFootprint()
@@ -383,7 +387,7 @@ final class Inference {
         let tLoop0 = Date()
         try denoise(noise: &noise, ref: ref, hidden: hidden, ehs: ehs,
                     ehsNeg: ehsNeg, guidance: guidance,
-                    imgIds: imgA, txtIds: txtA, stats: &s)
+                    imgIds: imgA, txtIds: txtA, stats: &s, maxSteps: maxSteps)
         s.loop = Date().timeIntervalSince(tLoop0)
 
         onStage?("VAE decode…")
