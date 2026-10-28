@@ -21,6 +21,9 @@ struct ContentView: View {
     /// Tail of Documents/phaseA.log, shown on screen so the evidence never
     /// depends on the Files folder being exposed.
     @State private var logText = ""
+    /// Models are fetched on first launch (ITMS-90558 moved them out of the
+    /// bundle); this gates the whole UI until they are installed.
+    @State private var payload: PayloadState = .checking
     /// Precomputed once (it stats every bundled weight file).
     @State private var verdict = ""
     /// Last pipeline stage reached — an error is reported against it, and a
@@ -45,7 +48,11 @@ struct ContentView: View {
                         .textSelection(.enabled)
                 }
 
-                controls
+                if payload == .ready {
+                    controls
+                } else {
+                    payloadCard
+                }
                 Text(status)
                     .font(.title3)
                     .foregroundStyle(status.contains("failed") ? Color.red : Color.primary)
@@ -79,6 +86,7 @@ struct ContentView: View {
         .task {
             verdict = Diagnostics.memoryVerdict()
             logText = Diagnostics.tail()
+            payload = PayloadStore.shared.state
         }
     }
 
@@ -100,6 +108,80 @@ struct ContentView: View {
                 .font(.system(.caption, design: .monospaced))
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    /// ITMS-90558: Apple refuses a 4 GB-thinned bundle, so the three compiled
+    /// .mlmodelc models are downloaded on first launch from the public HF
+    /// payload repo (device_manifest.json rides in the app; PayloadStore
+    /// mirrors it into Application Support and sha256-verifies every file).
+    private var payloadCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            switch payload {
+            case .checking:
+                Text("Checking installed models…").foregroundStyle(.secondary)
+            case .missing(let totalMB):
+                Text("Models not installed").font(.headline)
+                Text(String(format: "This build downloads %.2f GB of models from the CDN. Run it on Wi-Fi; the screen is held awake automatically. Interrupted downloads resume per file on Retry.", Double(totalMB) / 1024))
+                    .foregroundStyle(.secondary)
+                Button("Download models") { startDownload() }
+                    .buttonStyle(.borderedProminent)
+            case .downloading(let fraction, let doneMB, let totalMB):
+                Text("Downloading models…").font(.headline)
+                ProgressView(value: fraction)
+                Text("\(doneMB) / \(totalMB) MB")
+                    .font(.system(.body, design: .monospaced))
+                Button("Cancel", role: .destructive) { PayloadStore.shared.cancel() }
+            case .failed(let msg):
+                Text("Download failed").font(.headline)
+                Text(msg)
+                    .foregroundStyle(.red)
+                    .textSelection(.enabled)
+                Button("Retry download") { startDownload() }
+                    .buttonStyle(.borderedProminent)
+            case .ready:
+                EmptyView()
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.yellow.opacity(0.12), in: .rect(cornerRadius: 12))
+    }
+
+    /// Drives PayloadStore.downloadAll and polls its byte counters for the UI
+    /// (the URLSession delegate runs off-main, so state hops back here).
+    private func startDownload() {
+        let totalMB = (PayloadStore.shared.manifest?.totalBytes ?? 0) / 1_048_576
+        payload = .downloading(fraction: 0, doneMB: 0, totalMB: totalMB)
+        status = "Downloading models…"
+        Task {
+            let dl = Task { try await PayloadStore.shared.downloadAll() }
+            let poll = Task {
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .milliseconds(500))
+                    let s = PayloadStore.shared.snapshot()
+                    await MainActor.run {
+                        payload = .downloading(
+                            fraction: Double(s.done) / Double(max(s.total, 1)),
+                            doneMB: s.done / 1_048_576,
+                            totalMB: s.total / 1_048_576)
+                    }
+                }
+            }
+            do {
+                try await dl.value
+                poll.cancel()
+                payload = .ready
+                verdict = Diagnostics.memoryVerdict()
+                status = "Models installed. Pick a photo to begin."
+                logText = Diagnostics.tail()
+            } catch {
+                poll.cancel()
+                let msg = error.localizedDescription
+                Diagnostics.log("payload download failed: \(msg)")
+                payload = .failed(msg)
+                status = "Download failed."
+            }
         }
     }
 

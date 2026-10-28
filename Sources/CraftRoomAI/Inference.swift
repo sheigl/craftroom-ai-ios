@@ -108,8 +108,14 @@ final class Inference {
     private static func loadModel(name: String, units: MLComputeUnits) throws -> MLModel {
         let cfg = MLModelConfiguration()
         cfg.computeUnits = units
-        // Xcode precompiles bundled .mlpackage files into .mlmodelc; fall back
-        // to on-device compilation if the bundle carries the raw package.
+        // Since ITMS-90558 the compiled .mlmodelc dirs live in the first-launch
+        // download (Application Support/CraftRoomPayload), not in the bundle.
+        if let u = PayloadStore.shared.modelDir(named: name) {
+            return try MLModel(contentsOf: u, configuration: cfg)
+        }
+        // Legacy paths: Xcode precompiled in-bundle .mlpackage into .mlmodelc;
+        // fall back to on-device compilation if the bundle carries the raw
+        // package.
         if let u = Bundle.main.url(forResource: name, withExtension: "mlmodelc") {
             return try MLModel(contentsOf: u, configuration: cfg)
         }

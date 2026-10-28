@@ -1,8 +1,10 @@
 # Path A build: unsigned device .ipa from a clean checkout.
 #
-# The ~3.9 GB model payload never rides git. First run per payload tag
-# downloads it from the payload channel (GitHub Release assets or a Hugging
-# Face repo) and actions/cache keeps it for later runs (10 GB/repo cache).
+# Legacy sideload path — TestFlight (testflight.yml) is the delivery route.
+# Since ITMS-90558 the models are NOT bundled (4 GB thinned-bundle cap): the
+# app downloads them on first launch per Resources/device/device_manifest.json
+# (committed; produced by scripts/publish_device_payload.py). Only the small
+# bins ride in the ipa, so no payload fetch or cache is needed here anymore.
 #
 # The app is built for a real device (arm64 iphoneos) WITHOUT signing;
 # Sideloadly/AltStore re-signs the unsigned .app with the free Apple ID on
@@ -11,18 +13,6 @@ name: build-unsigned-ipa
 
 on:
   workflow_dispatch:
-    inputs:
-      payload_channel:
-        description: release (GitHub Release assets) or hf (Hugging Face repo)
-        required: true
-        default: release
-        type: choice
-        options: [release, hf]
-      payload_tag:
-        description: payload version (GitHub Release tag / HF revision)
-        required: true
-        default: payload-v1
-        type: string
 
 jobs:
   ipa:
@@ -32,28 +22,6 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
-
-      - name: Restore cached payload
-        id: cache
-        uses: actions/cache@v4
-        with:
-          # Resources/ rides the cache too: on a cache hit the fetch step
-          # is skipped, and xcodegen needs Resources/{models,bins} present.
-          path: |
-            .payload-cache
-            Resources/models
-            Resources/bins
-          key: payload-${{ inputs.payload_channel }}-${{ inputs.payload_tag }}
-
-      - name: Fetch payload (cache-miss only)
-        if: steps.cache.outputs.cache-hit != 'true'
-        env:
-          PAYLOAD_CHANNEL: ${{ inputs.payload_channel }}
-          PAYLOAD_REPO: ${{ vars.PAYLOAD_REPO }}
-          PAYLOAD_TAG: ${{ inputs.payload_tag }}
-          PAYLOAD_TOKEN: ${{ secrets.PAYLOAD_TOKEN }}
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: bash scripts/fetch_payload.sh
 
       - name: Install xcodegen
         run: brew install xcodegen
@@ -139,20 +107,9 @@ jobs:
           zip -qry CraftRoomAI-unsigned.ipa Payload
           ls -lh CraftRoomAI-unsigned.ipa
 
-      - name: Split ipa for artifact file limits
-        # upload-artifact has a 2 GB single-file ceiling; the ipa carries
-        # the int8 DiT, so split into 1.9 GB parts. Reassemble on the Mac:
-        #   cat CraftRoomAI-unsigned.ipa.part-* > CraftRoomAI-unsigned.ipa
-        run: |
-          set -euo pipefail
-          mkdir -p out
-          split -b 1900m CraftRoomAI-unsigned.ipa out/CraftRoomAI-unsigned.ipa.part-
-          ls -l out
-
-      - name: Upload ipa parts
+      - name: Upload ipa
         uses: actions/upload-artifact@v4
         with:
           name: CraftRoomAI-unsigned-ipa
-          path: out/CraftRoomAI-unsigned.ipa.part-*
-          compression-level: 1   # model weights are already compressed
+          path: CraftRoomAI-unsigned.ipa
           retention-days: 1

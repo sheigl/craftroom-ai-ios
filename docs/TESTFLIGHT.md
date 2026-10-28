@@ -31,11 +31,17 @@ so the Xcode ↔ iOS-version pairing never enters the picture.
 
 ## Each build after that
 
-Actions → **testflight** → Run workflow. Then:
+```
+gh workflow run testflight.yml          # build number defaults to run number
+```
+
+Then:
 
 ```
-archive → signed → uploaded → "Waiting for processing" (10–30 min for the
-3.9 GB payload) → the iPad shows the build → tap Update
+archive → signed → uploaded → "Waiting for processing" (minutes: the ipa is
+~50 MB since ITMS-90558 moved the models to a first-launch download) → the
+iPad shows the build → tap Update → open the app → "Download models" (~4 GB
+over Wi-Fi; the card shows MB progress and Retry resumes per file)
 ```
 
 There is no cable, no re-sign step, no 7-day profile expiry, and nothing to

@@ -76,19 +76,27 @@ enum Diagnostics {
         if let d = line.data(using: .utf8) { try? d.write(to: logURL) }
     }
 
-    /// Bytes of CoreML weights shipped inside the bundle. This is the number
-    /// that has to fit the app's jetsam budget, and it is read from the actual
-    /// installed payload rather than assumed from the build log.
+    /// Bytes of CoreML weights actually installed: the first-launch download
+    /// in Application Support (since ITMS-90558 moved them out of the ipa),
+    /// the in-bundle copy for the legacy build, or — before anything is
+    /// downloaded — the sizes declared in the bundled device manifest, so the
+    /// verdict line is honest from the very first launch.
     static func bundledWeightBytes() -> UInt64 {
-        guard let res = Bundle.main.resourceURL,
-              let walk = FileManager.default.enumerator(
-                at: res, includingPropertiesForKeys: [.fileSizeKey]) else { return 0 }
         var total: UInt64 = 0
-        for case let url as URL in walk where url.lastPathComponent == "weight.bin" {
-            let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-            total += UInt64(max(0, size))
+        let fm = FileManager.default
+        for root in [PayloadStore.shared.root, Bundle.main.resourceURL].compactMap({ $0 }) {
+            guard let walk = fm.enumerator(at: root, includingPropertiesForKeys: [.fileSizeKey]) else { continue }
+            for case let url as URL in walk where url.lastPathComponent == "weight.bin" {
+                let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                total += UInt64(max(0, size))
+            }
+            if total > 0 { return total }  // one installed source is enough
         }
-        return total
+        if let m = PayloadStore.shared.manifest {
+            return m.files.filter { $0.path.hasSuffix("weight.bin") }
+                .reduce(0) { $0 + UInt64(max(0, $1.size)) }
+        }
+        return 0
     }
 
     /// The verdict line the Phase A gate actually needs: how much room the OS

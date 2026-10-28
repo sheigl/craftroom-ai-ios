@@ -20,26 +20,18 @@
 # POST /v1/apps): an app record named "Craft Room AI" with bundle ID
 # com.sheigl.CraftRoomAI.
 #
-# Prerequisite: the payload cache may be cold. This workflow shares
-# build.yml's cache key, so a prior unsigned build makes the ~3.9 GB fetch
-# free.
+# Payload: the three compiled models no longer ride inside the ipa (Apple's
+# ITMS-90558 4 GB thinned-bundle cap). They are published to the public HF
+# repo by scripts/publish_device_payload.py and downloaded on first launch
+# against Resources/device/device_manifest.json, which MUST be committed —
+# the app cannot fetch without it. The ipa now carries only the harness and
+# the small bins (~50 MB), so no payload cache is needed here.
 
 name: testflight
 
 on:
   workflow_dispatch:
     inputs:
-      payload_channel:
-        description: release (GitHub Release assets) or hf (Hugging Face repo)
-        required: true
-        default: release
-        type: choice
-        options: [release, hf]
-      payload_tag:
-        description: payload version (GitHub Release tag / HF revision)
-        required: true
-        default: payload-v1
-        type: string
       build_number:
         description: CFBundleVersion override (default = run number; must exceed the last uploaded build)
         required: false
@@ -77,26 +69,6 @@ jobs:
           mkdir -p "$HOME/.appstoreconnect/private_keys"
           printf '%s' "$ASC_KEY_P8" | base64 -d > "$HOME/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8"
           chmod 600 "$HOME/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8"
-
-      - name: Restore cached payload
-        id: cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            .payload-cache
-            Resources/models
-            Resources/bins
-          key: payload-${{ inputs.payload_channel }}-${{ inputs.payload_tag }}
-
-      - name: Fetch payload (cache-miss only)
-        if: steps.cache.outputs.cache-hit != 'true'
-        env:
-          PAYLOAD_CHANNEL: ${{ inputs.payload_channel }}
-          PAYLOAD_REPO: ${{ vars.PAYLOAD_REPO }}
-          PAYLOAD_TAG: ${{ inputs.payload_tag }}
-          PAYLOAD_TOKEN: ${{ secrets.PAYLOAD_TOKEN }}
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: bash scripts/fetch_payload.sh
 
       - name: Install xcodegen
         run: brew install xcodegen
@@ -173,4 +145,5 @@ jobs:
           echo "build     : $BUILD_NUMBER"
           echo "header on the iPad should read: v<version> ($BUILD_NUMBER)"
           ls -lh "$RUNNER_TEMP/export" 2>/dev/null || true
-          echo "App Store Connect → TestFlight shows processing (10–30 min for a payload this size)."
+          echo "App Store Connect → TestFlight: the ipa is ~50 MB now, processing should take minutes."
+          echo "The iPad downloads ~4 GB of models on first launch (public HF payload repo)."

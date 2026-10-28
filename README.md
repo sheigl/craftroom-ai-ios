@@ -20,61 +20,61 @@ which runs the true-CFG pair — baked cond + uncond Qwen3 embeds,
 ```
 project.yml                       xcodegen project definition (CI generates)
 Sources/CraftRoomAI/*.swift       app: payload loader, CoreML pipeline, UI
-scripts/payload_manifest.txt      the payload file list (single source of truth)
-scripts/upload_payload.py         one-time staging + upload (runs where the payload lives)
-scripts/fetch_payload.sh          CI (or local) fetch into Resources/{models,bins}
-.github/workflows/build.yml       unsigned .ipa build + artifact
-docs/SIDELOAD.md                  install path: CI artifact -> family iPad
+Resources/bins/*.bin              small baked tensors (committed, ~31 MB)
+Resources/device/device_manifest.json
+                                  download list for the models (committed)
+scripts/publish_device_payload.py publish compiled .mlmodelc to the public HF repo
+scripts/payload_manifest.txt      legacy mlpackage channel (superseded)
+.github/workflows/testflight.yml  signed build → TestFlight (the delivery path)
+.github/workflows/build.yml       unsigned .ipa build (legacy sideload)
+docs/TESTFLIGHT.md                device loop through App Store Connect
 docs/PHASE-A.md                   what to measure on the iPad + verdict rule
 ```
 
-The ~3.9 GB payload (int8 DiT, fp16 VAE encoder/decoder, baked embeds/
-sigmas/ids/BN bins) **never rides git** and never rides an actions/cache
-key: it is fetched from the payload channel on cache-miss.
+## Payload: downloaded on first launch
 
-## One-time payload staging (runs on the box that holds the files)
+Apple's ITMS-90558 cap (thinned app bundle must be under 4 GB) rules out
+bundling the int8 DiT (3.88 GB of weight.bin alone; the old .app measured
+4,078,949,396 B). The models therefore live on a **public Hugging Face repo**
+(`sheigl/craftroom-ai-payload`, `device-v1/`): the ipa ships the harness +
+bins (~50 MB) and the app mirrors `device_manifest.json` into
+`Application Support/CraftRoomPayload/` on first launch — per-file download
+with size check, one-time sha256 verification, and per-file resume on Retry.
+The manifest is committed so every build carries the exact download list.
 
-Pick a channel and run from the dir holding `app_payload/` (e.g.
-`ios_assets/`):
+To re-publish after a model re-bake (runs on the box that holds a built ipa
+of this app — the .mlmodelc are compiled by Xcode on the CI runner):
 
 ```
-python3 scripts/upload_payload.py --channel release \
-    --repo OWNER/CraftRoomAIPayload --tag payload-v1 \
-    --dir app_payload
+python3 scripts/publish_device_payload.py \
+    --ipa dist/CraftRoomAI-unsigned.ipa \
+    --repo sheigl/craftroom-ai-payload --prefix device-v2 \
+    --manifest-out Resources/device/device_manifest.json
 ```
 
-- `--channel release` — public GitHub Release on github.com/OWNER/…; each
-  `.mlpackage` is zipped (stored, not deflated); bins verbatim. Per-asset
-  limit is 5 GB; `dit_int8` (~3.7 GB) fits.
-- `--channel hf` — repo on huggingface.co (private fine; CI then needs `HF_TOKEN`):
-  ```
-  python3 scripts/upload_payload.py --channel hf \
-      --repo OWNER/craftroom-ai-payload --tag main --dir app_payload
-  ```
+Commit the regenerated manifest, bump the prefix references, push. The
+`--prefix` per payload version lets a device keep serving an older build's
+expectations. (Superseded legacy scripts: `upload_payload.py` /
+`fetch_payload.sh` / `payload_manifest.txt` shipped mlpackages into the
+bundle — pre-ITMS-90558.)
 
-`txt_embeds_neg_fp32.bin` (guidance > 1) is part of the manifest — re-upload
-the tag (bump to payload-v2) whenever embeds are re-baked.
+## Build (TestFlight — the delivery path)
 
-## Repo setup (once)
+One-time App Store Connect setup (API key, secrets, app record, tester):
+**docs/TESTFLIGHT.md**. Then every ship is one command:
 
-1. Create the **public** harness repo, push this tree.
-2. Repo Settings → Secrets and variables → Actions → **Variables**:
-   `PAYLOAD_REPO = OWNER/craftroom-ai-payload` (the channel repo).
-   Add secret `HF_TOKEN` only for a private HF channel.
-3. Make sure the payload tag exists (step "One-time payload staging").
+```
+gh workflow run testflight.yml          # from the harness repo
+```
 
-## Build
+The ipa is ~50 MB, so archive → upload → "processing" takes minutes, and the
+iPad downloads the app from the TestFlight app. The first launch then offers
+the ~4 GB model download (models total ~3,698 MiB plus metadata).
 
-Actions → "build-unsigned-ipa" → Run workflow (channel + tag).
-First run (no cache) downloads ~4 GB, builds unsigned for the arm64 device
-SDK, and uploads `CraftRoomAI-unsigned-ipa` split into <2 GB parts
-(retention 1 day). Later runs hit `actions/cache` and take ~10 min.
-
-Cost notes (Free plan): macOS runners are billed at 10x; ~30 min x 10 = 300
-of the 2,000 monthly free units on the first run, ~100 on cached runs.
-Artifact free storage is 500 MB with 1-day retention — fine for one ipa.
-Runner pinning: the workflow starts at `macos-latest`; pin it to a concrete
-`macos-NN` image as soon as one is known good.
+Cost notes (Free plan): macOS runners are billed at 10x; a ~10 min signed
+run is ~100 of the 2,000 monthly free units. Runner pinning: the workflow
+starts at `macos-latest`; pin it to a concrete `macos-NN` image as soon as
+one is known good.
 
 ## Install + run
 
