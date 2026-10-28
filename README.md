@@ -35,9 +35,11 @@ docs/PHASE-A.md                   what to measure on the iPad + verdict rule
 
 Apple's ITMS-90558 cap (thinned app bundle must be under 4 GB) rules out
 bundling the int8 DiT (3.88 GB of weight.bin alone; the old .app measured
-4,078,949,396 B). The models therefore live on a **public Hugging Face repo**
-(`sheigl/craftroom-ai-payload`, `device-v1/`): the ipa ships the harness +
-bins (~50 MB) and the app mirrors `device_manifest.json` into
+4,078,949,396 B). The models therefore live as a public, carded model
+release on Hugging Face —
+[`sheigl/craftroom-ai-payload`](https://huggingface.co/sheigl/craftroom-ai-payload)
+(`device-v1/`) — the ipa ships the harness + bins (~50 MB) and the app
+mirrors `device_manifest.json` into
 `Application Support/CraftRoomPayload/` on first launch — per-file download
 with size check, one-time sha256 verification, and per-file resume on Retry.
 The manifest is committed so every build carries the exact download list.
@@ -49,7 +51,8 @@ of this app — the .mlmodelc are compiled by Xcode on the CI runner):
 python3 scripts/publish_device_payload.py \
     --ipa dist/CraftRoomAI-unsigned.ipa \
     --repo sheigl/craftroom-ai-payload --prefix device-v2 \
-    --manifest-out Resources/device/device_manifest.json
+    --manifest-out Resources/device/device_manifest.json \
+    --model-card scripts/device_payload_card.md
 ```
 
 Commit the regenerated manifest, bump the prefix references, push. The

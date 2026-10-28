@@ -48,6 +48,8 @@ def main():
     ap.add_argument("--prefix", default="device-v1")
     ap.add_argument("--staging", default="/mnt/1TB/craftroom-device-payload")
     ap.add_argument("--manifest-out", default="Resources/device/device_manifest.json")
+    ap.add_argument("--model-card", default=None,
+                    help="markdown file to publish as the HF repo README.md (model card)")
     a = ap.parse_args()
 
     os.makedirs(a.staging, exist_ok=True)
@@ -107,6 +109,13 @@ def main():
         path_in_repo=f"{a.prefix}/manifest.json",
         commit_message=f"{a.prefix}: manifest",
     )
+    if a.model_card:
+        api.upload_file(
+            repo_id=a.repo,
+            path_or_fileobj=a.model_card,
+            path_in_repo="README.md",
+            commit_message=f"{a.prefix}: model card",
+        )
 
     os.makedirs(os.path.dirname(a.manifest_out), exist_ok=True)
     with open(a.manifest_out, "w") as fh:
