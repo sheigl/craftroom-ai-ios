@@ -47,6 +47,11 @@ targets:
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
         NSPhotoLibraryUsageDescription: "Craft Room AI reads one photo you pick, to turn it into a coloring page. Everything stays on this iPad."
+        # TestFlight/App Store: the app ships no cryptography, so declare it
+        # here. Without this key App Store Connect holds the build at
+        # "Missing Compliance" until someone answers the export question in
+        # the UI — and it cannot be added after signing.
+        ITSAppUsesNonExemptEncryption: false
         # Diagnostics reachability (Diagnostics.swift writes Documents/phaseA.log):
         # on-device runs have no console, and a jetsam kill leaves no crash
         # report, so the log must be pullable from Finder.
