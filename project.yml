@@ -57,3 +57,15 @@ targets:
         # report, so the log must be pullable from Finder.
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
+    # Optional-but-load-bearing for Phase A: on a 12 GB iPad the default
+    # per-process jetsam budget is a few GB, and the whole question is whether
+    # ~3.6 GB of int8 weights fit. This entitlement asks iOS for the larger
+    # per-app ceiling that devices this size allow, so the measurement reports
+    # the device's real capacity instead of an under-stated default. It needs
+    # no portal toggle; automatic signing carries it into the profile. If a
+    # distribution profile ever refuses it, dropping these three lines is the
+    # whole revert.
+    entitlements:
+      path: Support/CraftRoomAI.entitlements
+      properties:
+        com.apple.developer.kernel.increased-memory-limit: true

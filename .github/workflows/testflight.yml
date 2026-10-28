@@ -114,6 +114,12 @@ jobs:
           /usr/libexec/PlistBuddy -c "Print :UIFileSharingEnabled" Support/Info.plist
           /usr/libexec/PlistBuddy -c "Print :ITSAppUsesNonExemptEncryption" Support/Info.plist
           /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" Support/Info.plist
+          # The memory ceiling the whole measurement depends on: the project
+          # must point at an entitlements file, and the file must carry the
+          # increased-memory-limit key.
+          echo "--- entitlements ---"
+          grep -q CODE_SIGN_ENTITLEMENTS CraftRoomAI.xcodeproj/project.pbxproj
+          cat Support/CraftRoomAI.entitlements
 
       - name: Archive (signed, App Store distribution)
         run: |
