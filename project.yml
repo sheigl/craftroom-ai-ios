@@ -39,6 +39,10 @@ targets:
       # no launch screen or orientations (two build warnings).
       properties:
         CFBundleDisplayName: Craft Room AI
+        # Reference the AppIcon asset catalog explicitly (Xcode 15 templates
+        # ship this key; TestFlight upload rejects the build without
+        # CFBundleIconName + resolvable icon files).
+        CFBundleIconName: AppIcon
         # Resolved from the build settings above, so the header on the iPad
         # matches the tag that was built.
         CFBundleShortVersionString: $(MARKETING_VERSION)
