@@ -89,6 +89,23 @@ struct ContentView: View {
             payload = PayloadStore.shared.state
             maybeStartAuto()
         }
+        // unattended ladder: paint the panel black (it is held awake for the
+        // duration, so keep the light down); also blocks stray taps mid-cell
+        .overlay {
+            if autoDim {
+                ZStack {
+                    Color.black.ignoresSafeArea()
+                    VStack(spacing: 8) {
+                        Text("auto ladder running")
+                            .font(.caption2)
+                            .foregroundStyle(.gray)
+                        Text(status)
+                            .font(.caption2)
+                            .foregroundStyle(.gray.opacity(0.6))
+                    }
+                }
+            }
+        }
     }
 
     /// The log tail, on screen. A screenshot of this is enough to diagnose a
@@ -238,46 +255,77 @@ struct ContentView: View {
         }
     }
 
-    // MARK: auto mode (remote ladder driver)
+    // MARK: auto mode (unattended ladder driver)
     //
-    // Launched via the developer tunnel with
-    //   --auto --units=all|cpu_gpu|cpu_only --guidance=1.0 --max-steps=2 --seed=0
-    // the harness picks the bundled test photo and runs a ladder cell with zero
-    // taps; timing results land as one AUTO-RESULT line in phaseA.log. Timing is
-    // content-independent (geometry is fixed), so the synthetic photo is fine.
+    // Two ways in, both needing no taps beyond launching the app:
+    //  1. launch args (developer tunnel/DVT):
+    //       --auto --units=all|cpu_gpu|cpu_only --guidance=1.0 --max-steps=2
+    //  2. Documents/auto.json, written over AFC from the relay box:
+    //       {"cells":[{"units":"all","guidance":1.0,"maxSteps":1}, ...]}
+    // Cells run back to back; each ends with one AUTO-RESULT line in
+    // phaseA.log, then the file is renamed auto.done.json so a relaunch does
+    // not repeat the ladder. Timing is content-independent (fixed geometry), so
+    // the bundled synthetic test photo is enough. The screen is held awake for
+    // the duration by the app itself (no Auto-Lock change) and painted black.
 
-    private struct AutoConfig {
+    private struct AutoCell {
         var units: ComputeUnitsOption
         var guidance: Double
         var seed: UInt64
         var maxSteps: Int
+        var label: String {
+            "\(units.rawValue) guidance \(String(format: "%.1f", guidance))"
+                + (maxSteps < 30 ? " max-steps \(maxSteps)" : "")
+        }
     }
 
     @State private var autoStarted = false
     @State private var autoWaitLogged = false
+    @State private var autoDim = false
 
-    private func autoConfig() -> AutoConfig? {
+    private static func units(from s: String?) -> ComputeUnitsOption {
+        switch s {
+        case "cpu_gpu":  return .cpuAndGPU
+        case "cpu_only": return .cpuOnly
+        default:         return .all
+        }
+    }
+
+    private static func autoJSONURL() -> URL? {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)
+            .first?.appendingPathComponent("auto.json")
+    }
+
+    /// Launch args first, then Documents/auto.json (a cell list).
+    private func autoLadder() -> [AutoCell]? {
+        if let single = launchArgCell() { return [single] }
+        guard let url = Self.autoJSONURL(),
+              let data = try? Data(contentsOf: url),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let raw = root["cells"] as? [[String: Any]], !raw.isEmpty else { return nil }
+        return raw.map { c in
+            AutoCell(units: Self.units(from: c["units"] as? String),
+                     guidance: (c["guidance"] as? NSNumber)?.doubleValue ?? 3.0,
+                     seed: (c["seed"] as? NSNumber)?.uint64Value ?? 0,
+                     maxSteps: max(1, min(30, (c["maxSteps"] as? NSNumber)?.intValue ?? 30)))
+        }
+    }
+
+    private func launchArgCell() -> AutoCell? {
         let a = CommandLine.arguments
         guard a.contains("--auto") else { return nil }
         func val(_ key: String) -> String? {
             guard let i = a.firstIndex(of: key), i + 1 < a.count else { return nil }
             return a[i + 1]
         }
-        let units: ComputeUnitsOption
-        switch val("--units") {
-        case "cpu_gpu":  units = .cpuAndGPU
-        case "cpu_only": units = .cpuOnly
-        default:         units = .all
-        }
-        return AutoConfig(
-            units: units,
-            guidance: Double(val("--guidance") ?? "3.0") ?? 3.0,
-            seed: UInt64(val("--seed") ?? "0") ?? 0,
-            maxSteps: max(1, min(30, Int(val("--max-steps") ?? "30") ?? 30)))
+        return AutoCell(units: Self.units(from: val("--units")),
+                        guidance: Double(val("--guidance") ?? "3.0") ?? 3.0,
+                        seed: UInt64(val("--seed") ?? "0") ?? 0,
+                        maxSteps: max(1, min(30, Int(val("--max-steps") ?? "30") ?? 30)))
     }
 
     private func maybeStartAuto() {
-        guard !autoStarted, let ac = autoConfig() else { return }
+        guard !autoStarted, let cells = autoLadder() else { return }
         guard case .ready = payload else {
             if !autoWaitLogged {
                 autoWaitLogged = true
@@ -291,85 +339,145 @@ struct ContentView: View {
             Diagnostics.log("ERROR auto: bundled test_photo.jpg missing")
             return
         }
-        run(preferredPhoto: img, preferredUnits: ac.units,
-            preferredGuidance: ac.guidance, preferredSeed: ac.seed,
-            maxSteps: ac.maxSteps)
+        autoDim = true
+        run(preferredPhoto: img, ladder: cells)
         // after run()'s Diagnostics.reset so the line survives into the log
-        Diagnostics.log("auto: units=\(ac.units.rawValue) guidance="
-            + String(format: "%.1f", ac.guidance) + " seed=\(ac.seed)"
-            + " max-steps=\(ac.maxSteps)")
+        Diagnostics.log("auto: \(cells.count) cell(s) — "
+            + cells.map(\.label).joined(separator: " · "))
     }
 
     // MARK: run
 
-    // Optional preferred* args let auto-mode (launch args) drive a run with no
-    // taps; the button path passes nothing and reads UI state as before.
+    /// The Generate button and the auto ladder share this. `ladder` means
+    /// unattended: cells back to back, black screen, screen held awake.
     private func run(preferredPhoto: UIImage? = nil,
                      preferredUnits: ComputeUnitsOption? = nil,
                      preferredGuidance: Double? = nil,
                      preferredSeed: UInt64? = nil,
-                     maxSteps: Int = 30) {
+                     maxSteps: Int = 30,
+                     ladder: [AutoCell]? = nil) {
         guard let photo = preferredPhoto ?? photo else { return }
-        let seed = preferredSeed
-            ?? UInt64(seedText.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
-        running = true
-        stats = ""
-        status = "Starting…"
-        stage = "start"
-        let units = preferredUnits ?? self.units
-        let guidance = preferredGuidance ?? self.guidance
+        let cells = ladder ?? [AutoCell(
+            units: preferredUnits ?? units,
+            guidance: preferredGuidance ?? guidance,
+            seed: preferredSeed
+                ?? UInt64(seedText.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0,
+            maxSteps: maxSteps)]
+        let auto = ladder != nil || preferredUnits != nil || maxSteps < 30
         let force = self.forceLoad
-        Diagnostics.reset("run on \(units.rawValue) guidance \(String(format: "%.1f", guidance))"
-            + " seed \(seed) photo \(Int(photo.size.width))x\(Int(photo.size.height))"
-            + (maxSteps < 30 ? " max-steps \(maxSteps)" : ""))
+        running = true
         Task.detached(priority: .userInitiated) {
-            // boxed local: the same thread writes it in the sink and reads it in
-            // the catch, and reading @State off-main would be unsound
-            var lastStage = "start"
-            do {
-                let stageSink: (String) -> Void = { msg in
-                    lastStage = msg
-                    Diagnostics.log("stage: " + msg)
-                    Task { await MainActor.run {
-                        status = msg
-                        stage = msg
-                    } }
+            // the run must survive Auto-Lock: hold the screen awake ourselves
+            // (Phase A runs are hours long; the setting stays user-controlled)
+            await MainActor.run { UIApplication.shared.isIdleTimerDisabled = true }
+            var aborted = false
+            for (idx, cell) in cells.enumerated() {
+                if aborted { break }
+                // boxed local: the same thread writes it in the sink and reads
+                // it in the catch, and reading @State off-main is unsound
+                var lastStage = "start"
+                // reset once at ladder start: later cells must not wipe the
+                // earlier AUTO-RESULT lines out of phaseA.log
+                if idx == 0 {
+                    Diagnostics.reset("run on \(cell.label) seed \(cell.seed)"
+                        + " photo \(Int(photo.size.width))x\(Int(photo.size.height))")
+                } else {
+                    Diagnostics.log("=== cell \(idx + 1)/\(cells.count): \(cell.label)")
                 }
-                let (img, s) = try await engine.run(units: units, photo: photo,
-                                                    seed: seed,
-                                                    guidance: Float(guidance),
-                                                    forceLoad: force,
-                                                    onStage: stageSink,
-                                                    maxSteps: maxSteps)
+                if idx == 0 && ladder != nil {
+                    for cell0 in cells { Self.appendLadder("CELL \(cell0.label)") }
+                }
                 await MainActor.run {
-                    running = false
-                    result = img
-                    status = "Done."
-                    stats = Self.format(s)
-                    logText = Diagnostics.tail()
-                    if maxSteps < 30 || preferredUnits != nil {
-                        // one machine-readable line for the remote ladder reader
-                        let fw: Double = guidance > 1 ? 2 : 1
-                        let med = s.stepMillis.sorted()[max(0, s.stepMillis.count / 2 - 1)]
-                        Diagnostics.log("AUTO-RESULT units=\(s.units) guidance="
-                            + String(format: "%.1f", guidance)
-                            + " steps=\(s.stepMillis.count)"
-                            + " median_step_ms=" + String(format: "%.0f", med)
-                            + " median_forward_ms=" + String(format: "%.0f", med / fw)
-                            + " peak_mem_mb=" + String(format: "%.0f", s.peakMemMB))
+                    stats = ""
+                    status = "Starting…"
+                    stage = "start"
+                }
+                do {
+                    let stageSink: (String) -> Void = { msg in
+                        lastStage = msg
+                        Diagnostics.log("stage: " + msg)
+                        Task { await MainActor.run {
+                            status = msg
+                            stage = msg
+                        } }
                     }
-                }
-            } catch {
-                let msg = error.localizedDescription
-                let failedAt = lastStage   // immutable copy for the @Sendable hop
-                Diagnostics.log("ERROR at \(failedAt): \(msg)")
-                await MainActor.run {
-                    running = false
-                    status = "\(failedAt) failed: \(msg)"
-                    logText = Diagnostics.tail()
+                    let (img, s) = try await engine.run(units: cell.units, photo: photo,
+                                                        seed: cell.seed,
+                                                        guidance: Float(cell.guidance),
+                                                        forceLoad: force,
+                                                        onStage: stageSink,
+                                                        maxSteps: cell.maxSteps)
+                    let line = auto ? Self.autoResult(s, cell) : ""
+                    await MainActor.run {
+                        result = img
+                        status = "Done."
+                        stats = Self.format(s)
+                        if !line.isEmpty {
+                            Diagnostics.log(line)
+                            Self.appendLadder(line)
+                        }
+                        logText = Diagnostics.tail()
+                    }
+                } catch {
+                    let msg = error.localizedDescription
+                    let failedAt = lastStage   // immutable copy for the @Sendable hop
+                    Diagnostics.log("ERROR at \(failedAt): \(msg)")
+                    await MainActor.run {
+                        status = "\(failedAt) failed: \(msg)"
+                        logText = Diagnostics.tail()
+                    }
+                    aborted = true
                 }
             }
+            if ladder != nil {
+                let done = "auto: ladder complete (\(cells.count) cell(s)"
+                    + (aborted ? ", aborted early" : "") + ")"
+                Diagnostics.log(done)
+                Self.appendLadder(done)
+                // consume the config: a relaunch must not repeat the ladder
+                if let url = Self.autoJSONURL() {
+                    let done = url.deletingLastPathComponent()
+                        .appendingPathComponent("auto.done.json")
+                    try? FileManager.default.removeItem(at: done)
+                    try? FileManager.default.moveItem(at: url, to: done)
+                }
+            }
+            await MainActor.run {
+                running = false
+                autoDim = false
+                logText = Diagnostics.tail()
+            }
+            // release last, so a finished ladder cannot wake the screen again
+            await MainActor.run { UIApplication.shared.isIdleTimerDisabled = false }
         }
+    }
+
+    /// Durable copy of the ladder results: phaseA.log is reset per launch, so
+    /// the cells also accumulate here (never truncated).
+    private static func appendLadder(_ line: String) {
+        guard let url = FileManager.default.urls(for: .documentDirectory,
+                                                 in: .userDomainMask).first?
+            .appendingPathComponent("ladder.log") else { return }
+        let data = Data((line + "\n").utf8)
+        if let handle = try? FileHandle(forWritingTo: url) {
+            defer { try? handle.close() }
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: data)
+        } else {
+            try? data.write(to: url, options: .atomic)
+        }
+    }
+
+    private static func autoResult(_ s: RunStats, _ cell: AutoCell) -> String {
+        // one machine-readable line for the remote ladder reader
+        let fw: Double = cell.guidance > 1 ? 2 : 1
+        let med = s.stepMillis.sorted()[max(0, s.stepMillis.count / 2 - 1)]
+        return "AUTO-RESULT units=\(s.units) guidance="
+            + String(format: "%.1f", cell.guidance)
+            + " steps=\(s.stepMillis.count)"
+            + " median_step_ms=" + String(format: "%.0f", med)
+            + " median_forward_ms=" + String(format: "%.0f", med / fw)
+            + " peak_mem_mb=" + String(format: "%.0f", s.peakMemMB)
     }
 
     static func format(_ s: RunStats) -> String {
