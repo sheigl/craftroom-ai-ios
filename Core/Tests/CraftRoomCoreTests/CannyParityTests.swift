@@ -11,23 +11,25 @@ import ImageIO
 /// `sdxl/teacher/device_v2/make_canny_fixtures.py`).
 ///
 /// The target is bit-exact: every stage of the recipe is integer arithmetic
-/// that reproduces OpenCV 4.11 exactly (luma via the SIMD coefficients, the
-/// fixed-point Gaussian, the canny NMS direction test and hysteresis). The
-/// test asserts *zero* differing pixels; `agreement` / `edgeIoU` are computed
-/// and printed as the numbers quoted in HANDOFF (the plan's fallback gate is
-/// >= 99.5 % agreement and IoU >= 0.99).
+/// that reproduces OpenCV 4.11 exactly (luma via its SIMD coefficients, the
+/// fixed-point Gaussian, canny's TG22 direction test and its asymmetric NMS
+/// comparisons, 100/200 hysteresis, 3x3 dilation). The test asserts *zero*
+/// differing pixels; `agreement` / `edgeIoU` are printed as the numbers quoted
+/// in HANDOFF (the plan's fallback gate is >= 99.5 % and IoU >= 0.99).
+///
+/// Fixtures are PNGs (decoded with CoreGraphics on Apple platforms). Linux runs
+/// use the same pixels from a local-only `raw/` directory, which the fixture
+/// script writes for `swift test` on the build box.
 final class CannyParityTests: XCTestCase {
     struct Fixture: Decodable {
         let name: String
         let width: Int
         let height: Int
         let edgePixels: Int
-        let edgeRatio: Double
 
         enum CodingKeys: String, CodingKey {
             case name, width, height
             case edgePixels = "edge_pixels"
-            case edgeRatio = "edge_ratio"
         }
     }
 
@@ -41,10 +43,19 @@ final class CannyParityTests: XCTestCase {
         let expected: [UInt8]
     }
 
+    enum FixtureError: Error, CustomStringConvertible {
+        case decode(String)
+
+        var description: String {
+            switch self {
+            case .decode(let m): return "fixture decode failed: \(m)"
+            }
+        }
+    }
+
     // MARK: fixture plumbing
 
     static var fixtureDirectory: URL? {
-        // SwiftPM copies the whole Fixtures directory next to the test bundle.
         guard let base = Bundle.module.url(forResource: "Fixtures", withExtension: nil) else {
             return nil
         }
@@ -59,20 +70,62 @@ final class CannyParityTests: XCTestCase {
         return try JSONDecoder().decode(FixtureIndex.self, from: data).fixtures
     }
 
+    #if canImport(CoreGraphics)
+    struct DecodedImage {
+        let bytes: [UInt8]      // interleaved
+        let width: Int
+        let height: Int
+        let channels: Int
+    }
+
+    /// Decodes an 8-bit PNG into interleaved bytes (CoreGraphics).
+    static func decodePNG(_ url: URL) throws -> DecodedImage {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let image = CGImageSourceCreateImageAtIndex(src, 0, nil) else {
+            throw FixtureError.decode("cannot open \(url.lastPathComponent)")
+        }
+        let w = image.width, h = image.height
+        let monochrome = image.colorSpace?.model == .monochrome
+        let count = monochrome ? 1 : 4
+        var bytes = [UInt8](repeating: 0, count: w * h * count)
+        let cs = image.colorSpace ?? CGColorSpaceCreateDeviceRGB()
+        guard let ctx = CGContext(data: &bytes, width: w, height: h,
+                                  bitsPerComponent: 8, bytesPerRow: w * count,
+                                  space: cs,
+                                  bitmapInfo: count == 1
+                                      ? CGImageAlphaInfo.none.rawValue
+                                      : CGImageAlphaInfo.noneSkipLast.rawValue) else {
+            throw FixtureError.decode("no bitmap context for \(url.lastPathComponent)")
+        }
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        return DecodedImage(bytes: bytes, width: w, height: h, channels: count)
+    }
+    #endif
+
     private func load(_ meta: Fixture) throws -> LoadedFixture {
         let dir = Self.fixtureDirectory!
         #if canImport(CoreGraphics)
-        let rgb = try Self.decodePNG(dir.appendingPathComponent("in_\(meta.name).png"))
-        let mask = try Self.decodePNG(dir.appendingPathComponent("edge_\(meta.name).png"))
-        guard let rgbChannel = rgb.channels.first, rgb.channels.count == 3 else {
-            throw XCTSkip("unexpected channel count")
+        let input = try Self.decodePNG(dir.appendingPathComponent("in_\(meta.name).png"))
+        guard input.width == meta.width, input.height == meta.height,
+              input.channels == 3 || input.channels == 4 else {
+            throw FixtureError.decode("\(meta.name): unexpected input geometry/channels")
         }
-        guard let maskChannel = mask.channels.first else { throw XCTSkip("no mask") }
-        return LoadedFixture(meta: meta, rgb: rgbChannel, expected: maskChannel)
+        var rgb = [UInt8](repeating: 0, count: input.width * input.height * 3)
+        let n = input.width * input.height
+        for i in 0..<n {
+            let o = i * input.channels
+            rgb[i * 3] = input.bytes[o]
+            rgb[i * 3 + 1] = input.bytes[o + 1]
+            rgb[i * 3 + 2] = input.bytes[o + 2]
+        }
+        let mask = try Self.decodePNG(dir.appendingPathComponent("edge_\(meta.name).png"))
+        guard mask.width == meta.width, mask.height == meta.height, mask.channels == 1 else {
+            throw FixtureError.decode("\(meta.name): unexpected mask geometry")
+        }
+        return LoadedFixture(meta: meta, rgb: rgb, expected: mask.bytes)
         #else
-        // Linux: the PNG decoder is CoreGraphics-only, so `raw/` holds the same
-        // pixels as bare buffers (written by the fixture script for local runs
-        // and not committed).
+        // Linux: CoreGraphics is Apple-only, so `raw/` holds the same pixels as
+        // bare buffers (written locally by the fixture script, not committed).
         let raw = dir.appendingPathComponent("raw", isDirectory: true)
         let rgbURL = raw.appendingPathComponent("\(meta.name).rgb8")
         let maskURL = raw.appendingPathComponent("\(meta.name).mask8")
@@ -87,42 +140,6 @@ final class CannyParityTests: XCTestCase {
         return LoadedFixture(meta: meta, rgb: rgb, expected: mask)
         #endif
     }
-
-    #if canImport(CoreGraphics)
-    struct DecodedImage {
-        let channels: [[UInt8]]
-        let width: Int
-        let height: Int
-    }
-
-    /// Decodes an 8-bit PNG into planar 8-bit channels (CoreGraphics).
-    static func decodePNG(_ url: URL) throws -> DecodedImage {
-        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let image = CGImageSourceCreateImageAtIndex(src, 0, nil) else {
-            throw XCTSkip("cannot decode \(url.lastPathComponent)")
-        }
-        let w = image.width, h = image.height
-        let count = image.colorSpace?.model == .monochrome ? 1 : 4
-        var bytes = [UInt8](repeating: 0, count: w * h * count)
-        let cs = image.colorSpace ?? CGColorSpaceCreateDeviceRGB()
-        guard let ctx = CGContext(data: &bytes, width: w, height: h,
-                                  bitsPerComponent: 8, bytesPerRow: w * count,
-                                  space: cs,
-                                  bitmapInfo: count == 1
-                                      ? CGImageAlphaInfo.none.rawValue
-                                      : CGImageAlphaInfo.noneSkipLast.rawValue) else {
-            throw XCTSkip("no bitmap context for \(url.lastPathComponent)")
-        }
-        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
-        // The fixture PNGs are single-channel masks (gray) or RGB inputs; the
-        // context above always hands back `count` interleaved channels.
-        var planes = [[UInt8]](repeating: [UInt8](repeating: 0, count: w * h), count: count)
-        for i in 0..<(w * h) {
-            for c in 0..<count { planes[c][i] = bytes[i * count + c] }
-        }
-        return DecodedImage(channels: planes, width: w, height: h)
-    }
-    #endif
 
     // MARK: tests
 
@@ -176,10 +193,10 @@ final class CannyParityTests: XCTestCase {
         XCTAssertEqual(a, b)
     }
 
-    func testBlankImageHasNoEdges() {
+    func testBlankImageHasNoEdges() throws {
         let w = 96, h = 64
         let rgb = [UInt8](repeating: 200, count: w * h * 3)
-        let mask = try! CannyEdgeV1.edgeMask(rgb: rgb, width: w, height: h)
+        let mask = try CannyEdgeV1.edgeMask(rgb: rgb, width: w, height: h)
         XCTAssertFalse(mask.contains { $0 != 0 }, "a flat image must produce no edges")
     }
 

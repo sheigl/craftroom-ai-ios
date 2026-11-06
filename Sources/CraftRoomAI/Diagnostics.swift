@@ -79,18 +79,30 @@ enum Diagnostics {
     /// Bytes of CoreML weights actually installed: the first-launch download
     /// in Application Support (since ITMS-90558 moved them out of the ipa),
     /// the in-bundle copy for the legacy build, or — before anything is
-    /// downloaded — the sizes declared in the bundled device manifest, so the
+    /// downloaded — the sizes declared in the bundled manifest, so the
     /// verdict line is honest from the very first launch.
     static func bundledWeightBytes() -> UInt64 {
-        var total: UInt64 = 0
         let fm = FileManager.default
-        for root in [PayloadStore.shared.root, Bundle.main.resourceURL].compactMap({ $0 }) {
-            guard let walk = fm.enumerator(at: root, includingPropertiesForKeys: [.fileSizeKey]) else { continue }
+        func weightBytes(under root: URL?) -> UInt64 {
+            guard let root,
+                  let walk = fm.enumerator(at: root, includingPropertiesForKeys: [.fileSizeKey])
+            else { return 0 }
+            var total: UInt64 = 0
             for case let url as URL in walk where url.lastPathComponent == "weight.bin" {
                 let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
                 total += UInt64(max(0, size))
             }
-            if total > 0 { return total }  // one installed source is enough
+            return total
+        }
+        let installed = weightBytes(under: PayloadStore.shared.root)
+        if installed > 0 { return installed }
+        let bundled = weightBytes(under: Bundle.main.resourceURL)
+        if bundled > 0 { return bundled }
+        if let m = PayloadStore.shared.manifestV2 {
+            // the variant actually selected, not the whole manifest
+            return PayloadStore.shared.entries
+                .filter { $0.path.hasSuffix("weight.bin") }
+                .reduce(0) { $0 + UInt64(max(0, $1.size)) }
         }
         if let m = PayloadStore.shared.manifest {
             return m.files.filter { $0.path.hasSuffix("weight.bin") }

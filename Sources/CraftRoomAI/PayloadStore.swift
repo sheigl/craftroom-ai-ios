@@ -1,10 +1,11 @@
 import Foundation
 import CryptoKit
 import UIKit
+import CraftRoomCore
 
-/// One downloadable file of the device payload (see
-/// scripts/publish_device_payload.py; the manifest is bundled as
-/// Resources/device/device_manifest.json).
+/// One downloadable file of the **legacy** `device-v1` payload (klein). Kept
+/// so the v0.4 store still compiles and can still serve an old bundle; the
+/// v0.5 harness uses `PayloadManifestV2` from CraftRoomCore.
 struct DeviceFile: Codable {
     let path: String
     let size: Int64
@@ -28,71 +29,162 @@ enum PayloadState: Equatable {
     case failed(String)
 }
 
-/// The models are compiled .mlmodelc directories downloaded on first launch
-/// into Application Support/CraftRoomPayload/ (ITMS-90558: the int8 DiT alone
-/// puts the app bundle over Apple's 4 GB thinned-bundle limit, so the weights
-/// can no longer ride inside the ipa). The harness reads them from here;
-/// Inference/Diagnostics fall back to the bundle for the old in-bundle build.
-final class PayloadStore: NSObject, URLSessionDownloadDelegate {
+/// Device-v2 payload store (v0.5).
+///
+/// Downloads the compiled `.mlmodelc` trees and embed bins declared by
+/// `CraftRoomCore`'s `device_manifest_v2.json` into
+/// `Application Support/CraftRoomPayload/`, one file at a time:
+///
+///  * **base URL** — the manifest's CDN base by default; a single line in
+///    `Documents/payload_base_url.txt` overrides it (T5 points the iPad at the
+///    LAN server, `http://192.168.68.83:<port>/device_v2/payload/`).
+///  * **variant** — `sdpa` (default) or `split_einsum`; only that 2.87 GB UNet
+///    subtree plus the shared files is fetched, so switching attention layouts
+///    costs one model, not a second payload.
+///  * **resume** — a `.part` file is appended to across attempts with an HTTP
+///    `Range` request; if the server answers `200` instead of `206` the file
+///    restarts (python's `http.server` does not implement ranges).
+///  * **integrity** — size then sha256 per file, before it is moved into place.
+///
+/// The model weights no longer ride in the ipa (ITMS-90558: 4 GB thinned-bundle
+/// cap), which is why this store is the first-launch path.
+final class PayloadStore: NSObject, URLSessionDataDelegate {
     static let shared = PayloadStore()
 
     let root: URL
+    /// Legacy device-v1 manifest, if a bundle still ships one.
     private(set) var manifest: DeviceManifest?
+    /// The v0.5 manifest.
+    private(set) var manifestV2: PayloadManifestV2?
 
     private var session: URLSession!
-    private var task: URLSessionDownloadTask?
-    private var continuation: CheckedContinuation<URL, Error>?
-    private var liveBytes: Int64 = 0      // bytes of the in-flight file
-    private var settledBytes: Int64 = 0   // files finished in this run
-    private let queue = OperationQueue()
+    private var variantKey: String = "sdpa"
+    private var base: String = ""
+    private var pendingTask: URLSessionDataTask?
+    private var pendingContinuation: CheckedContinuation<Void, Error>?
+    private var pendingHandle: FileHandle?
+    private var pendingExpectation: (path: String, url: URL)?
+    private var liveBytes: Int64 = 0
+    private var settledBytes: Int64 = 0
+    private var totalBytes: Int64 = 0
+    private let defaults = UserDefaults.standard
+    private static let variantDefaultsKey = "payload.variant"
 
     private override init() {
-        let base = FileManager.default
+        let baseDir = FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        root = base.appendingPathComponent("CraftRoomPayload", isDirectory: true)
+        root = baseDir.appendingPathComponent("CraftRoomPayload", isDirectory: true)
         super.init()
         let cfg = URLSessionConfiguration.default
         cfg.timeoutIntervalForResource = .infinity
         cfg.timeoutIntervalForRequest = .infinity
         cfg.waitsForConnectivity = true
-        session = URLSession(configuration: cfg, delegate: self, delegateQueue: queue)
-        manifest = Self.loadBundledManifest()
+        session = URLSession(configuration: cfg, delegate: self, delegateQueue: nil)
+        manifest = Self.loadBundledV1Manifest()
+        manifestV2 = try? PayloadManifestV2.bundled()
+        if let m = manifestV2 {
+            let saved = defaults.string(forKey: Self.variantDefaultsKey)
+            variantKey = (saved.flatMap { m.variants[$0] != nil ? $0 : nil }) ?? m.defaultVariant
+            base = PayloadBaseURL.resolve(manifestBase: m.urlBase,
+                                          documents: Self.documentsURL)
+        }
+        DiagnosticsShim.sink = { Diagnostics.log($0) }
     }
 
-    private static func loadBundledManifest() -> DeviceManifest? {
-        guard let u = Bundle.main.url(forResource: "device_manifest",
-                                      withExtension: "json"),
+    // MARK: configuration
+
+    static var documentsURL: URL? {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+    }
+
+    /// Selected attention variant (`sdpa` / `split_einsum`).
+    var variant: String {
+        get { variantKey }
+        set {
+            guard let m = manifestV2, m.variants[newValue] != nil else { return }
+            variantKey = newValue
+            defaults.set(newValue, forKey: Self.variantDefaultsKey)
+            refreshTotals()
+        }
+    }
+
+    var variants: [String] { manifestV2?.variants.keys.sorted() ?? [] }
+
+    /// Base URL actually in use (override already applied).
+    var baseURL: String { base }
+
+    var overrideSource: String? {
+        guard let docs = Self.documentsURL else { return nil }
+        return PayloadBaseURL.override(in: docs)
+    }
+
+    private static func loadBundledV1Manifest() -> DeviceManifest? {
+        guard let u = Bundle.main.url(forResource: "device_manifest", withExtension: "json"),
               let d = try? Data(contentsOf: u) else { return nil }
         return try? JSONDecoder().decode(DeviceManifest.self, from: d)
     }
 
+    private func refreshTotals() {
+        guard let m = manifestV2 else { return }
+        totalBytes = (try? m.bytes(forVariant: variantKey)) ?? 0
+    }
+
+    /// Entries needed for the selected variant, in manifest order.
+    var entries: [PayloadManifestV2.FileEntry] {
+        guard let m = manifestV2 else { return [] }
+        return (try? m.entries(forVariant: variantKey)) ?? []
+    }
+
+    // MARK: state
+
     var state: PayloadState {
-        guard let manifest else {
-            return .failed("device_manifest.json missing from the app bundle")
+        guard let m = manifestV2 else {
+            return .failed("device_manifest_v2.json missing from CraftRoomCore")
         }
         if !isReady {
-            return .missing(totalMB: manifest.totalBytes / 1_048_576)
+            let total = (try? m.bytes(forVariant: variantKey)) ?? m.totalBytes
+            return .missing(totalMB: total / 1_048_576)
         }
         return .ready
     }
 
-    /// All manifest files present at exactly their declared size. Size-only
-    /// check here; the sha256 is verified once per file right after download.
+    /// Every file of the selected variant present at exactly its declared size.
+    /// (The sha256 is verified once, right after each download.)
     var isReady: Bool {
-        guard let manifest else { return false }
-        let fm = FileManager.default
-        for f in manifest.files {
-            let p = root.appendingPathComponent(f.path)
-            guard let v = try? p.resourceValues(forKeys: [.fileSizeKey]).fileSize,
-                  Int64(v) == f.size else { return false }
-        }
+        guard manifestV2 != nil else { return false }
+        for f in entries where !Self.fileComplete(f, in: root) { return false }
+        return !entries.isEmpty
+    }
+
+    private static func fileComplete(_ f: PayloadManifestV2.FileEntry, in root: URL) -> Bool {
+        let p = root.appendingPathComponent(f.path)
+        guard let v = try? p.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+              Int64(v) == f.size else { return false }
         return true
     }
 
-    /// The downloaded model dir for loadModel(named:), nil until complete.
+    /// The downloaded `.mlmodelc` directory for the loader, nil until every
+    /// file of that model is complete. Accepts the manifest model name with or
+    /// without the `.mlmodelc` extension.
     func modelDir(named: String) -> URL? {
+        if let m = manifestV2 {
+            let wanted = named.hasSuffix(".mlmodelc") ? named : named + ".mlmodelc"
+            let modelDirName: String
+            if m.models.contains(wanted) {
+                modelDirName = wanted
+            } else if let first = entries.first(where: { $0.path.hasPrefix(named) }) {
+                let head = first.path.split(separator: "/").first.map(String.init) ?? wanted
+                modelDirName = head
+            } else {
+                return nil
+            }
+            let files = entries.filter { $0.path.hasPrefix(modelDirName + "/") }
+            guard !files.isEmpty,
+                  files.allSatisfy({ Self.fileComplete($0, in: root) }) else { return nil }
+            return root.appendingPathComponent(modelDirName)
+        }
+        // legacy v1 path (device-v1 payload of an older bundle)
         guard let manifest else { return nil }
-        let dir = root.appendingPathComponent(named + ".mlmodelc")
         let files = manifest.files.filter { $0.path.hasPrefix(named + ".mlmodelc/") }
         guard !files.isEmpty else { return nil }
         for f in files {
@@ -100,35 +192,49 @@ final class PayloadStore: NSObject, URLSessionDownloadDelegate {
             guard let v = try? p.resourceValues(forKeys: [.fileSizeKey]).fileSize,
                   Int64(v) == f.size else { return nil }
         }
-        return dir
+        return root.appendingPathComponent(named + ".mlmodelc")
     }
 
-    /// Download every missing file, sequentially. Safe to re-tap after a
-    /// failure: completed files are skipped by size, so this resumes per file.
+    /// Absolute URL of a payload-relative path (embeds, scheduler bins).
+    func resourceURL(_ relativePath: String) -> URL? {
+        let url = root.appendingPathComponent(relativePath)
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
+    // MARK: download
+
+    /// Downloads every missing file of the selected variant, sequentially.
+    /// Re-entrant: complete files are skipped, partial ones resume.
     @MainActor
     func downloadAll() async throws {
-        guard let manifest else {
-            throw PipError.badPayload("device_manifest.json missing from the app bundle")
+        guard let m = manifestV2 else {
+            throw PipError.badPayload("device_manifest_v2.json missing from CraftRoomCore")
         }
-        let fm = FileManager.default
-        let pending = manifest.files.filter { f in
-            let p = root.appendingPathComponent(f.path)
-            guard let v = try? p.resourceValues(forKeys: [.fileSizeKey]).fileSize else { return true }
-            return Int64(v) != f.size
-        }
-        settledBytes = manifest.totalBytes - pending.reduce(0) { $0 + $1.size }
-        liveBytes = 0
+        if base.isEmpty { base = PayloadBaseURL.resolve(manifestBase: m.urlBase,
+                                                        documents: Self.documentsURL) }
+        refreshTotals()
+        let pending = entries.filter { !Self.fileComplete($0, in: root) }
+        settledBytes = totalBytes - pending.reduce(0) { $0 + $1.size }
         UIApplication.shared.isIdleTimerDisabled = true
         defer { UIApplication.shared.isIdleTimerDisabled = false }
+
+        Diagnostics.log("payload: \(m.version) variant \(variantKey) base \(base) "
+                        + "· \(pending.count) file(s), "
+                        + "\(totalBytes / 1_048_576) MB total")
         for f in pending {
-            let tmp = try await download(f)
-            // sha256 over up to 3.9 GB must not run on the main actor
-            try await Task.detached(priority: .userInitiated) { try self.verify(f, at: tmp) }.value
+            guard let url = m.url(for: f, base: base) else {
+                throw PipError.badPayload("bad url for \(f.path) against \(base)")
+            }
             let dest = root.appendingPathComponent(f.path)
-            try fm.createDirectory(at: dest.deletingLastPathComponent(),
-                                   withIntermediateDirectories: true)
-            try? fm.removeItem(at: dest)
-            try fm.moveItem(at: tmp, to: dest)
+            try FileManager.default.createDirectory(at: dest.deletingLastPathComponent(),
+                                                   withIntermediateDirectories: true)
+            let partial = dest.appendingPathExtension("part")
+            try await download(f, from: url, to: partial)
+            try await Task.detached(priority: .userInitiated) {
+                try Self.verify(f, at: partial)
+            }.value
+            try? FileManager.default.removeItem(at: dest)
+            try FileManager.default.moveItem(at: partial, to: dest)
             settledBytes += f.size
             liveBytes = 0
             Diagnostics.log("payload: \(f.path) ok (\(f.size / 1_048_576) MB)")
@@ -136,33 +242,95 @@ final class PayloadStore: NSObject, URLSessionDownloadDelegate {
     }
 
     func cancel() {
-        task?.cancel()
+        pendingTask?.cancel()
     }
 
-    /// UI polls this while downloading (the delegate runs off-main).
+    /// UI polls this while downloading (the session delegate runs off-main).
     func snapshot() -> (done: Int64, total: Int64) {
-        (settledBytes + liveBytes, manifest?.totalBytes ?? 0)
+        (min(settledBytes + liveBytes, max(totalBytes, 1)), totalBytes)
     }
 
-    // MARK: download plumbing
+    // MARK: resumable file transfer
 
-    private func download(_ file: DeviceFile) async throws -> URL {
-        guard let url = URL(string: file.url) else {
-            throw PipError.badPayload("bad url for \(file.path)")
+    private func download(_ f: PayloadManifestV2.FileEntry, from url: URL,
+                          to partial: URL) async throws {
+        let fm = FileManager.default
+        var offset: Int64 = 0
+        if let size = try? partial.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+           Int64(size) > 0, Int64(size) < f.size {
+            offset = Int64(size)
+            Diagnostics.log("payload: resuming \(f.path) at \(offset) B")
+        } else {
+            try? fm.removeItem(at: partial)
+            fm.createFile(atPath: partial.path, contents: nil)
         }
-        liveBytes = 0
-        return try await withCheckedThrowingContinuation { cont in
-            continuation = cont
-            let t = session.downloadTask(with: url)
-            task = t
-            t.resume()
+        guard let handle = try? FileHandle(forWritingTo: partial) else {
+            throw PipError.badPayload("cannot open \(partial.path)")
+        }
+        _ = try? handle.seekToEnd()
+        pendingHandle = handle
+        pendingExpectation = (f.path, url)
+        liveBytes = offset
+
+        var request = URLRequest(url: url)
+        if offset > 0 {
+            request.setValue("bytes=\(offset)-", forHTTPHeaderField: "Range")
+        }
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            pendingContinuation = cont
+            let task = session.dataTask(with: request)
+            pendingTask = task
+            task.resume()
         }
     }
 
-    private func verify(_ file: DeviceFile, at url: URL) throws {
+    private func finish(error: Error?) {
+        try? pendingHandle?.close()
+        pendingHandle = nil
+        let cont = pendingContinuation
+        pendingContinuation = nil
+        pendingTask = nil
+        if let error {
+            cont?.resume(throwing: error)
+        } else {
+            cont?.resume()
+        }
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
+                    didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        // 200 means the server ignored our Range header → restart the file.
+        if let http = response as? HTTPURLResponse, http.statusCode == 200,
+           liveBytes > 0, let handle = pendingHandle, let expect = pendingExpectation {
+            // 200 means the Range header was ignored (python's http.server) —
+            // truncate so the bytes are not appended twice.
+            try? handle.truncate(atOffset: 0)
+            _ = try? handle.seek(toOffset: 0)
+            liveBytes = 0
+            Diagnostics.log("payload: \(expect.path) server sent 200, restarting")
+        }
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        if pendingHandle == nil {
+            // arrived after a cancel; drop it
+            pendingTask?.cancel()
+            return
+        }
+        try? pendingHandle?.write(contentsOf: data)
+        liveBytes += Int64(data.count)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        finish(error: error)
+    }
+
+    private static func verify(_ f: PayloadManifestV2.FileEntry, at url: URL) throws {
         let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-        guard Int64(size) == file.size else {
-            throw PipError.badPayload("\(file.path): size \(size), expected \(file.size)")
+        guard Int64(size) == f.size else {
+            throw PipError.badPayload("\(f.path): size \(size), expected \(f.size)")
         }
         var hasher = SHA256()
         let fh = try FileHandle(forReadingFrom: url)
@@ -171,40 +339,9 @@ final class PayloadStore: NSObject, URLSessionDownloadDelegate {
         }
         try fh.close()
         let hex = hasher.finalize().map { String(format: "%02x", $0) }.joined()
-        guard hex == file.sha256 else {
-            throw PipError.badPayload("\(file.path): sha256 mismatch")
+        guard hex == f.sha256 else {
+            throw PipError.badPayload("\(f.path): sha256 mismatch (\(hex.prefix(12))…)")
         }
     }
 
-    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
-                    didWriteData: Int64, totalBytesWritten: Int64,
-                    totalBytesExpectedToWrite: Int64) {
-        liveBytes = totalBytesWritten
-    }
-
-    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
-                    didResumeAtOffset fileOffset: Int64, expectedTotalBytes: Int64) {
-        liveBytes = fileOffset
-    }
-
-    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
-                    didFinishDownloadingTo location: URL) {
-        // the temp file is deleted when this returns — move it somewhere ours
-        let keep = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString + ".part")
-        do {
-            try FileManager.default.moveItem(at: location, to: keep)
-            continuation?.resume(returning: keep)
-        } catch {
-            continuation?.resume(throwing: error)
-        }
-        continuation = nil
-    }
-
-    func urlSession(_ session: URLSession, task: URLSessionTask,
-                    didCompleteWithError error: Error?) {
-        guard let error else { return }
-        continuation?.resume(throwing: error)
-        continuation = nil
-    }
 }

@@ -13,9 +13,34 @@ name: build-unsigned-ipa
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
 
 jobs:
+  # CraftRoomCore: canny parity fixtures, Euler scheduler golden, payload
+  # manifest v2 — the v0.5 gate. Runs first and fast; the ipa job needs it.
+  core:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: swift test (CraftRoomCore)
+        working-directory: Core
+        run: |
+          set -euo pipefail
+          swift --version
+          swift test 2>&1 | tee /tmp/core-tests.log | tail -60
+          grep -E "Executed [0-9]+ tests" /tmp/core-tests.log | tail -2
+
+      - name: Canny parity summary
+        if: always()
+        working-directory: Core
+        run: |
+          grep -E "^canny |^euler:" /tmp/core-tests.log || true
+
   ipa:
+    needs: core
     # arm64 macOS runner with the full Xcode toolchain. Pin when the
     # default image starts drifting (see README "runner pinning").
     runs-on: macos-latest

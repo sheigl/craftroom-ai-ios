@@ -11,14 +11,23 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5"
-    MARKETING_VERSION: "0.4.1"
-    CURRENT_PROJECT_VERSION: "3"
+    MARKETING_VERSION: "0.5.0"
+    CURRENT_PROJECT_VERSION: "8"
     TARGETED_DEVICE_FAMILY: "2"          # iPad
     IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+# v0.5: the harness core (canny_edge_v1, baked Euler schedule, payload manifest
+# v2) lives in a SwiftPM package so the same code is unit-tested on the macOS
+# runner (`swift test` in Core/) and shipped in the app.
+packages:
+  CraftRoomCore:
+    path: Core
 targets:
   CraftRoomAI:
     type: application
     platform: iOS
+    dependencies:
+      - package: CraftRoomCore
+        product: CraftRoomCore
     settings:
       base:
         # TestFlight validates harder than the sideload path: without an app
@@ -28,8 +37,8 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     sources:
       - path: Sources/CraftRoomAI
-      - path: Resources/bins
-        buildPhase: resources
+      # device-v1 manifest (unchanged) — the v0.5 harness reads the device-v2
+      # manifest + scheduler bin from CraftRoomCore's resources instead.
       - path: Resources/device
         buildPhase: resources
       # auto mode's synthetic photo (timing is content-independent; see

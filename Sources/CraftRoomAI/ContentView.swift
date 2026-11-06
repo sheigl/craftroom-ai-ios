@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import CraftRoomCore
 
 struct ContentView: View {
     @State private var photo: UIImage?
@@ -8,34 +9,25 @@ struct ContentView: View {
     @State private var stats = ""
     @State private var running = false
     @State private var units: ComputeUnitsOption = .all
+    @State private var variant: AttentionVariant = .sdpa
+    @State private var steps: Int = Spatial.defaultSteps
     @State private var showPicker = false
-    @State private var seedText = "0"
-    // ladder verdict: guidance 3.0 is the ship setting (2.0 fallback); the
-    // picker lets one device run measure 1.0 (30 forwards) vs 3.0 (60 forwards)
-    @State private var guidance: Double = 3.0
+    @State private var seedText = "42"
     /// Default ON: a kill still leaves the budget-vs-weights line in the log,
-    /// which IS the measurement — so we attempt and log rather than refuse.
-    /// Turning it off makes the preflight stop the run instead (safe mode for
-    /// a demo where a crash would be embarrassing).
+    /// which IS the measurement, so we attempt and log rather than refuse.
     @State private var forceLoad = true
-    /// Tail of Documents/phaseA.log, shown on screen so the evidence never
-    /// depends on the Files folder being exposed.
     @State private var logText = ""
-    /// Models are fetched on first launch (ITMS-90558 moved them out of the
-    /// bundle); this gates the whole UI until they are installed.
     @State private var payload: PayloadState = .checking
-    /// Precomputed once (it stats every bundled weight file).
     @State private var verdict = ""
-    /// Last pipeline stage reached — an error is reported against it, and a
-    /// kill leaves it in phaseA.log.
     @State private var stage = "start"
+    @State private var savedName = ""
 
     private let engine = Engine()
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                Text("Craft Room AI — Phase A")
+                Text("Craft Room AI — device v2")
                     .font(.largeTitle.bold())
                 Text("\(Diagnostics.build) · \(Diagnostics.summary())")
                     .font(.caption)
@@ -58,12 +50,21 @@ struct ContentView: View {
                     .foregroundStyle(status.contains("failed") ? Color.red : Color.primary)
                 if let result {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Result (768×768)")
+                        Text("Result")
                             .font(.headline)
                         Image(uiImage: result)
                             .resizable()
                             .scaledToFit()
                             .frame(maxWidth: .infinity, minHeight: 320)
+                        HStack {
+                            Button("Save PNG") { save(result) }
+                                .buttonStyle(.bordered)
+                            if !savedName.isEmpty {
+                                Text(savedName)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
                     }
                 }
                 if !stats.isEmpty {
@@ -87,10 +88,9 @@ struct ContentView: View {
             verdict = Diagnostics.memoryVerdict()
             logText = Diagnostics.tail()
             payload = PayloadStore.shared.state
+            variant = AttentionVariant(rawValue: PayloadStore.shared.variant) ?? .sdpa
             maybeStartAuto()
         }
-        // unattended ladder: paint the panel black (it is held awake for the
-        // duration, so keep the light down); also blocks stray taps mid-cell
         .overlay {
             if autoDim {
                 ZStack {
@@ -108,9 +108,6 @@ struct ContentView: View {
         }
     }
 
-    /// The log tail, on screen. A screenshot of this is enough to diagnose a
-    /// run, which matters because the Files folder depends on a correct
-    /// Info.plist (see the v0.3.0 packaging fix).
     private var logPanel: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
@@ -129,18 +126,36 @@ struct ContentView: View {
         }
     }
 
-    /// ITMS-90558: Apple refuses a 4 GB-thinned bundle, so the three compiled
-    /// .mlmodelc models are downloaded on first launch from the public HF
-    /// payload repo (device_manifest.json rides in the app; PayloadStore
-    /// mirrors it into Application Support and sha256-verifies every file).
+    // MARK: payload
+
     private var payloadCard: some View {
         VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Picker("Attention", selection: $variant) {
+                    ForEach(AttentionVariant.allCases) { v in
+                        Text(v.label).tag(v)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .disabled(running)
+            }
+            Text("base: \(PayloadStore.shared.baseURL)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+            if let override = PayloadStore.shared.overrideSource {
+                Text("override: \(override)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
             switch payload {
             case .checking:
                 Text("Checking installed models…").foregroundStyle(.secondary)
             case .missing(let totalMB):
                 Text("Models not installed").font(.headline)
-                Text(String(format: "This build downloads %.2f GB of models from the CDN. Run it on Wi-Fi; the screen is held awake automatically. Interrupted downloads resume per file on Retry.", Double(totalMB) / 1024))
+                Text(String(format: "This build downloads %.2f GB of the device-v2 payload (%@). Run it on Wi-Fi; the screen is held awake automatically. An interrupted file resumes where it stopped (the `.part` bytes are reused when the server supports Range).",
+                            Double(totalMB) / 1024, variant.label))
                     .foregroundStyle(.secondary)
                 Button("Download models") { startDownload() }
                     .buttonStyle(.borderedProminent)
@@ -166,10 +181,10 @@ struct ContentView: View {
         .background(.yellow.opacity(0.12), in: .rect(cornerRadius: 12))
     }
 
-    /// Drives PayloadStore.downloadAll and polls its byte counters for the UI
-    /// (the URLSession delegate runs off-main, so state hops back here).
     private func startDownload() {
-        let totalMB = (PayloadStore.shared.manifest?.totalBytes ?? 0) / 1_048_576
+        PayloadStore.shared.variant = variant.rawValue
+        let totalMB = (PayloadStore.shared.manifestV2
+            .flatMap { try? $0.bytes(forVariant: variant.rawValue) } ?? 0) / 1_048_576
         payload = .downloading(fraction: 0, doneMB: 0, totalMB: totalMB)
         status = "Downloading models…"
         Task {
@@ -191,7 +206,7 @@ struct ContentView: View {
                 poll.cancel()
                 payload = .ready
                 verdict = Diagnostics.memoryVerdict()
-                maybeStartAuto()   // first-launch auto cell starts when the payload lands
+                maybeStartAuto()
                 status = "Models installed. Pick a photo to begin."
                 logText = Diagnostics.tail()
             } catch {
@@ -204,7 +219,7 @@ struct ContentView: View {
         }
     }
 
-    // MARK: pieces
+    // MARK: controls
 
     private var controls: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -219,15 +234,27 @@ struct ContentView: View {
                         .clipShape(.rect)
                 }
             }
-            Picker("Compute", selection: $units) {
+            Picker("Units", selection: $units) {
                 ForEach(ComputeUnitsOption.allCases) { opt in
-                    Text(opt.rawValue).tag(opt)
+                    Text(opt.label).tag(opt)
                 }
             }
             .pickerStyle(.segmented)
-            Picker("Guidance", selection: $guidance) {
-                ForEach([1.0, 2.0, 3.0, 4.0], id: \.self) { g in
-                    Text(String(format: "%.1f", g)).tag(g)
+            .disabled(running)
+            Picker("Attention", selection: $variant) {
+                ForEach(AttentionVariant.allCases) { v in
+                    Text(v.label).tag(v)
+                }
+            }
+            .pickerStyle(.segmented)
+            .disabled(running)
+            .onChange(of: variant) { _, new in
+                PayloadStore.shared.variant = new.rawValue
+                payload = PayloadStore.shared.state
+            }
+            Picker("Steps", selection: $steps) {
+                ForEach([1, 5, 30], id: \.self) { n in
+                    Text("\(n)").tag(n)
                 }
             }
             .pickerStyle(.segmented)
@@ -246,8 +273,7 @@ struct ContentView: View {
                 Button {
                     run()
                 } label: {
-                    Text("Generate")
-                        .font(.headline)
+                    Text("Generate").font(.headline)
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(photo == nil)
@@ -255,28 +281,26 @@ struct ContentView: View {
         }
     }
 
-    // MARK: auto mode (unattended ladder driver)
-    //
-    // Two ways in, both needing no taps beyond launching the app:
-    //  1. launch args (developer tunnel/DVT):
-    //       --auto --units=all|cpu_gpu|cpu_only --guidance=1.0 --max-steps=2
-    //  2. Documents/auto.json, written over AFC from the relay box:
-    //       {"cells":[{"units":"all","guidance":1.0,"maxSteps":1}, ...]}
-    // Cells run back to back; each ends with one AUTO-RESULT line in
-    // phaseA.log, then the file is renamed auto.done.json so a relaunch does
-    // not repeat the ladder. Timing is content-independent (fixed geometry), so
-    // the bundled synthetic test photo is enough. The screen is held awake for
-    // the duration by the app itself (no Auto-Lock change) and painted black.
+    // MARK: auto mode (unattended ladder)
 
-    private struct AutoCell {
+    // Two ways in, both needing no taps beyond launching the app:
+    //  1. launch args: --auto --units=all|cpu_only|ane --model=sdpa|split_einsum
+    //                  --steps=30 --seed=42
+    //  2. Documents/auto.json:
+    //       {"cells":[{"units":"all","model":"sdpa","steps":1,"seed":42}, …]}
+    // Cells run back to back; each ends with one AUTO-RESULT line in
+    // Documents/ladder.log (never truncated), then auto.json becomes
+    // auto.done.json so a relaunch does not repeat the ladder. Timing is
+    // content-independent (fixed graph), so the bundled test photo is enough.
+    // The screen is held awake by the app itself and painted black.
+
+    struct AutoCell {
         var units: ComputeUnitsOption
-        var guidance: Double
+        var variant: AttentionVariant
+        var steps: Int
         var seed: UInt64
-        var maxSteps: Int
-        var label: String {
-            "\(units.rawValue) guidance \(String(format: "%.1f", guidance))"
-                + (maxSteps < 30 ? " max-steps \(maxSteps)" : "")
-        }
+
+        var label: String { "\(units.rawValue)/\(variant.rawValue)/\(steps)" }
     }
 
     @State private var autoStarted = false
@@ -285,10 +309,14 @@ struct ContentView: View {
 
     private static func units(from s: String?) -> ComputeUnitsOption {
         switch s {
-        case "cpu_gpu":  return .cpuAndGPU
-        case "cpu_only": return .cpuOnly
-        default:         return .all
+        case "cpu_only", "cpuOnly": return .cpuOnly
+        case "ane", "cpuAndNeuralEngine": return .cpuAndNeuralEngine
+        default: return .all
         }
+    }
+
+    private static func variant(from s: String?) -> AttentionVariant {
+        AttentionVariant(rawValue: s ?? "") ?? .sdpa
     }
 
     private static func autoJSONURL() -> URL? {
@@ -296,7 +324,6 @@ struct ContentView: View {
             .first?.appendingPathComponent("auto.json")
     }
 
-    /// Launch args first, then Documents/auto.json (a cell list).
     private func autoLadder() -> [AutoCell]? {
         if let single = launchArgCell() { return [single] }
         guard let url = Self.autoJSONURL(),
@@ -305,9 +332,10 @@ struct ContentView: View {
               let raw = root["cells"] as? [[String: Any]], !raw.isEmpty else { return nil }
         return raw.map { c in
             AutoCell(units: Self.units(from: c["units"] as? String),
-                     guidance: (c["guidance"] as? NSNumber)?.doubleValue ?? 3.0,
-                     seed: (c["seed"] as? NSNumber)?.uint64Value ?? 0,
-                     maxSteps: max(1, min(30, (c["maxSteps"] as? NSNumber)?.intValue ?? 30)))
+                     variant: Self.variant(from: c["model"] as? String),
+                     steps: max(1, min(30, (c["steps"] as? NSNumber)?.intValue
+                                        ?? (c["maxSteps"] as? NSNumber)?.intValue ?? 30)),
+                     seed: (c["seed"] as? NSNumber)?.uint64Value ?? 42)
         }
     }
 
@@ -319,9 +347,9 @@ struct ContentView: View {
             return a[i + 1]
         }
         return AutoCell(units: Self.units(from: val("--units")),
-                        guidance: Double(val("--guidance") ?? "3.0") ?? 3.0,
-                        seed: UInt64(val("--seed") ?? "0") ?? 0,
-                        maxSteps: max(1, min(30, Int(val("--max-steps") ?? "30") ?? 30)))
+                        variant: Self.variant(from: val("--model")),
+                        steps: max(1, min(30, Int(val("--steps") ?? "30") ?? 30)),
+                        seed: UInt64(val("--seed") ?? "42") ?? 42)
     }
 
     private func maybeStartAuto() {
@@ -341,43 +369,28 @@ struct ContentView: View {
         }
         autoDim = true
         run(preferredPhoto: img, ladder: cells)
-        // after run()'s Diagnostics.reset so the line survives into the log
         Diagnostics.log("auto: \(cells.count) cell(s) — "
             + cells.map(\.label).joined(separator: " · "))
     }
 
     // MARK: run
 
-    /// The Generate button and the auto ladder share this. `ladder` means
-    /// unattended: cells back to back, black screen, screen held awake.
-    private func run(preferredPhoto: UIImage? = nil,
-                     preferredUnits: ComputeUnitsOption? = nil,
-                     preferredGuidance: Double? = nil,
-                     preferredSeed: UInt64? = nil,
-                     maxSteps: Int = 30,
-                     ladder: [AutoCell]? = nil) {
+    private func run(preferredPhoto: UIImage? = nil, ladder: [AutoCell]? = nil) {
         guard let photo = preferredPhoto ?? photo else { return }
         let cells = ladder ?? [AutoCell(
-            units: preferredUnits ?? units,
-            guidance: preferredGuidance ?? guidance,
-            seed: preferredSeed
-                ?? UInt64(seedText.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0,
-            maxSteps: maxSteps)]
-        let auto = ladder != nil || preferredUnits != nil || maxSteps < 30
-        let force = self.forceLoad
+            units: units,
+            variant: variant,
+            steps: steps,
+            seed: UInt64(seedText.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 42)]
+        let auto = ladder != nil
+        let force = forceLoad
         running = true
         Task.detached(priority: .userInitiated) {
-            // the run must survive Auto-Lock: hold the screen awake ourselves
-            // (Phase A runs are hours long; the setting stays user-controlled)
             await MainActor.run { UIApplication.shared.isIdleTimerDisabled = true }
             var aborted = false
             for (idx, cell) in cells.enumerated() {
                 if aborted { break }
-                // boxed local: the same thread writes it in the sink and reads
-                // it in the catch, and reading @State off-main is unsound
                 var lastStage = "start"
-                // reset once at ladder start: later cells must not wipe the
-                // earlier AUTO-RESULT lines out of phaseA.log
                 if idx == 0 {
                     Diagnostics.reset("run on \(cell.label) seed \(cell.seed)"
                         + " photo \(Int(photo.size.width))x\(Int(photo.size.height))")
@@ -401,17 +414,23 @@ struct ContentView: View {
                             stage = msg
                         } }
                     }
-                    let (img, s) = try await engine.run(units: cell.units, photo: photo,
+                    let (img, s) = try await engine.run(units: cell.units,
+                                                        variant: cell.variant,
+                                                        photo: photo,
                                                         seed: cell.seed,
-                                                        guidance: Float(cell.guidance),
                                                         forceLoad: force,
                                                         onStage: stageSink,
-                                                        maxSteps: cell.maxSteps)
+                                                        steps: cell.steps)
+                    var saved: String?
+                    if auto || ladder != nil {
+                        saved = Self.saveRender(img, cell: cell, seed: cell.seed)
+                    }
                     let line = auto ? Self.autoResult(s, cell) : ""
                     await MainActor.run {
                         result = img
                         status = "Done."
                         stats = Self.format(s)
+                        if let saved { savedName = saved }
                         if !line.isEmpty {
                             Diagnostics.log(line)
                             Self.appendLadder(line)
@@ -420,7 +439,7 @@ struct ContentView: View {
                     }
                 } catch {
                     let msg = error.localizedDescription
-                    let failedAt = lastStage   // immutable copy for the @Sendable hop
+                    let failedAt = lastStage
                     Diagnostics.log("ERROR at \(failedAt): \(msg)")
                     await MainActor.run {
                         status = "\(failedAt) failed: \(msg)"
@@ -434,12 +453,11 @@ struct ContentView: View {
                     + (aborted ? ", aborted early" : "") + ")"
                 Diagnostics.log(done)
                 Self.appendLadder(done)
-                // consume the config: a relaunch must not repeat the ladder
                 if let url = Self.autoJSONURL() {
-                    let done = url.deletingLastPathComponent()
+                    let doneURL = url.deletingLastPathComponent()
                         .appendingPathComponent("auto.done.json")
-                    try? FileManager.default.removeItem(at: done)
-                    try? FileManager.default.moveItem(at: url, to: done)
+                    try? FileManager.default.removeItem(at: doneURL)
+                    try? FileManager.default.moveItem(at: url, to: doneURL)
                 }
             }
             await MainActor.run {
@@ -447,7 +465,6 @@ struct ContentView: View {
                 autoDim = false
                 logText = Diagnostics.tail()
             }
-            // release last, so a finished ladder cannot wake the screen again
             await MainActor.run { UIApplication.shared.isIdleTimerDisabled = false }
         }
     }
@@ -468,16 +485,45 @@ struct ContentView: View {
         }
     }
 
+    /// One machine-readable line per ladder cell. Keeps the v0.4 field names
+    /// (`units=`, `median_forward_ms=`, `peak_mem_mb=`) and adds `model=` and
+    /// `steps=`; batch 2 means one forward per step, so step == forward time.
     private static func autoResult(_ s: RunStats, _ cell: AutoCell) -> String {
-        // one machine-readable line for the remote ladder reader
-        let fw: Double = cell.guidance > 1 ? 2 : 1
-        let med = s.stepMillis.sorted()[max(0, s.stepMillis.count / 2 - 1)]
-        return "AUTO-RESULT units=\(s.units) guidance="
-            + String(format: "%.1f", cell.guidance)
+        let sorted = s.stepMillis.sorted()
+        let med = sorted.isEmpty ? 0 : sorted[max(0, sorted.count / 2 - 1)]
+        return "AUTO-RESULT units=\(s.units) model=\(cell.variant.rawValue)"
             + " steps=\(s.stepMillis.count)"
             + " median_step_ms=" + String(format: "%.0f", med)
-            + " median_forward_ms=" + String(format: "%.0f", med / fw)
+            + " median_forward_ms=" + String(format: "%.0f", med)
             + " peak_mem_mb=" + String(format: "%.0f", s.peakMemMB)
+            + " total_s=" + String(format: "%.1f", s.total)
+            + " canvas=" + s.canvas
+    }
+
+    /// Renders land in Documents/renders/ so the T6 grading round can pull them
+    /// over AFC/Finder without another share sheet.
+    private static func saveRender(_ image: UIImage, cell: AutoCell, seed: UInt64) -> String? {
+        guard let docs = FileManager.default.urls(for: .documentDirectory,
+                                                  in: .userDomainMask).first,
+              let data = image.pngData() else { return nil }
+        let dir = docs.appendingPathComponent("renders", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let f = DateFormatter()
+        f.dateFormat = "HHmmss"
+        let name = "\(cell.units.rawValue)_\(cell.variant.rawValue)_s\(cell.steps)"
+            + "_seed\(seed)_\(f.string(from: Date())).png"
+        do {
+            try data.write(to: dir.appendingPathComponent(name), options: .atomic)
+            return "renders/\(name)"
+        } catch {
+            Diagnostics.log("ERROR saving render: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    private func save(_ image: UIImage) {
+        let cell = AutoCell(units: units, variant: variant, steps: steps, seed: 0)
+        savedName = Self.saveRender(image, cell: cell, seed: 0) ?? ""
     }
 
     static func format(_ s: RunStats) -> String {
@@ -487,11 +533,12 @@ struct ContentView: View {
         let slowest = ms.max() ?? 0
         return """
         units:          \(s.units)
-        guidance:       \(String(format: "%.1f", s.guidance))
+        model:          \(s.variant)
+        steps:          \(s.steps) (\(s.forwards) forwards, batch 2)
+        canvas:         \(s.canvas)
         model load:     \(sec(s.modelLoad))
-        prep:           \(sec(s.prep))
-        vae encode:     \(sec(s.encode))
-        loop (\(s.forwards) fwd): \(sec(s.loop))
+        prep+canny:     \(sec(s.encode))
+        loop:           \(sec(s.loop))
           per step avg: \(String(format: "%.0f", avg)) ms \
         (min \(String(format: "%.0f", fastest)) / max \(String(format: "%.0f", slowest)))
         vae decode:     \(sec(s.decode))
@@ -505,32 +552,30 @@ struct ContentView: View {
     }
 }
 
-/// Owns the loaded models across runs (Phase A: models reload only when the
-/// compute-unit choice changes).
+/// Owns the loaded models across runs. The UNet must be reloaded when the
+/// compute-unit set or the attention variant changes; the VAE never does.
 final class Engine {
     private var inference: Inference?
     private var loadedUnits: ComputeUnitsOption?
+    private var loadedVariant: AttentionVariant?
     private var lastLoad: Double = 0
 
-    func run(units: ComputeUnitsOption, photo: UIImage, seed: UInt64,
-             guidance: Float, forceLoad: Bool,
+    func run(units: ComputeUnitsOption, variant: AttentionVariant, photo: UIImage,
+             seed: UInt64, forceLoad: Bool,
              onStage: @escaping (String) -> Void,
-             maxSteps: Int = 30) throws -> (UIImage, RunStats) {
-        if inference == nil || loadedUnits != units {
-            onStage("Loading models (\(units.rawValue))…")
-            let inf = try Inference()
-            let load = try inf.loadModels(units: units, force: forceLoad)
+             steps: Int = Spatial.defaultSteps) throws -> (UIImage, RunStats) {
+        if inference == nil || loadedUnits != units || loadedVariant != variant {
+            onStage("Loading \(variant.label) on \(units.label)…")
+            let inf = Inference()
+            lastLoad = try inf.loadModels(units: units, variant: variant, force: forceLoad)
             inference = inf
             loadedUnits = units
-            lastLoad = load
+            loadedVariant = variant
         }
         guard let inference else { throw PipError.model("engine not ready") }
         var (img, stats) = try inference.generate(from: photo, seed: seed,
-                                                  guidance: guidance, onStage: onStage,
-                                                  maxSteps: maxSteps)
+                                                 steps: steps, onStage: onStage)
         stats.modelLoad = lastLoad
-        // report the set that actually ran, not the one requested (they differ
-        // when a plan build failed and Inference degraded)
         stats.units = inference.effectiveUnits.rawValue
         return (img, stats)
     }
