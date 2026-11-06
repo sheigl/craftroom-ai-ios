@@ -1,0 +1,40 @@
+# COMPILE-ONLY spike (T2 device-v2): compile a .mlpackage -> .mlmodelc on the
+# macOS runner. Never touches the device-v1 payload, build.yml, or testflight.yml.
+# Input: a release asset URL for the .zip of the .mlpackage produced on Linux.
+name: compile-mlpackage
+
+on:
+  workflow_dispatch:
+    inputs:
+      pkg_zip_url:
+        description: URL of the .zip containing the .mlpackage (release asset)
+        required: true
+      pkg_name:
+        description: Package folder name inside the zip (e.g. Unet_ControlNet_canny1200_6bit.mlpackage)
+        required: true
+        default: Unet_ControlNet_canny1200_6bit.mlpackage
+
+jobs:
+  compile:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - name: Download package
+        run: |
+          curl -L -o pkg.zip "${{ inputs.pkg_zip_url }}"
+          unzip -q pkg.zip
+          ls -d "${{ inputs.pkg_name }}"
+      - name: Compile with coremlcompiler
+        run: |
+          xcrun coremlcompiler compile "${{ inputs.pkg_name }}" compiled/
+          echo "--- compiled tree ---"
+          du -sh compiled/*
+          find compiled -maxdepth 2 | head -20
+          echo "MODEL_IO below"
+          xcrun coremlcompiler info "${{ inputs.pkg_name }}" | head -60
+      - name: Upload compiled model (zip)
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiled-mlmodelc
+          path: compiled/
+          retention-days: 7
