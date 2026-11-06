@@ -7,7 +7,10 @@ on:
   workflow_dispatch:
     inputs:
       pkg_zip_url:
-        description: URL of the .zip containing the .mlpackage (release asset)
+        description: >-
+          URL(s) of the .zip containing the .mlpackage. Space-separated: parts are
+          concatenated in order (a single URL is just one part). The .zip must have
+          the .mlpackage folder at its top level.
         required: true
       pkg_name:
         description: Package folder name inside the zip (e.g. Unet_ControlNet_canny1200_6bit.mlpackage)
@@ -18,23 +21,63 @@ jobs:
   compile:
     runs-on: macos-latest
     timeout-minutes: 90
+    env:
+      PKG: ${{ inputs.pkg_name }}
     steps:
+      - name: Runner inventory
+        run: |
+          sw_vers
+          xcrun --sdk macosx --show-sdk-version
+          df -h /
       - name: Download package
         run: |
-          curl -L -o pkg.zip "${{ inputs.pkg_zip_url }}"
+          set -euo pipefail
+          rm -f pkg.zip
+          i=0
+          for url in ${{ inputs.pkg_zip_url }}; do
+            echo "part $i <- $url"
+            curl -L --retry 3 --retry-delay 5 --fail -o "part-$i.bin" "$url"
+            cat "part-$i.bin" >> pkg.zip
+            rm -f "part-$i.bin"
+            i=$((i+1))
+          done
+          ls -l pkg.zip
           unzip -q pkg.zip
-          ls -d "${{ inputs.pkg_name }}"
+          ls -d "$PKG"
+          du -sh "$PKG"
+          echo "--- package identity (must match the Linux build) ---"
+          shasum -a 256 "$PKG/Data/com.apple.CoreML/weights/weight.bin" || true
+          df -h /
+      - name: Inspect package I/O
+        run: |
+          plutil -p "$PKG/Manifest.json" || true
+          cat "$PKG/Data/com.apple.CoreML/model.mlmodel" > /dev/null && echo "model.mlmodel present"
+          # `coremlcompiler info` is not present on every Xcode; never fail on it
+          xcrun coremlcompiler info "$PKG" 2>&1 | head -80 || true
       - name: Compile with coremlcompiler
         run: |
-          xcrun coremlcompiler compile "${{ inputs.pkg_name }}" compiled/
+          set -o pipefail
+          xcrun coremlcompiler compile "$PKG" compiled/ 2>&1 | tee compile.log
           echo "--- compiled tree ---"
           du -sh compiled/*
-          find compiled -maxdepth 2 | head -20
-          echo "MODEL_IO below"
-          xcrun coremlcompiler info "${{ inputs.pkg_name }}" | head -60
+          find compiled -maxdepth 2 | head -30
+          echo "--- compiled weight/op stats ---"
+          find compiled -name weight.bin -exec ls -l {} \;
+          for m in compiled/*.mlmodelc/model.mil; do
+            echo "MIL $m"
+            grep -oE '^\s*[a-z_]+\(' "$m" | tr -d ' (' | sort | uniq -c | sort -rn | head -25
+          done
+      - name: Free disk before upload
+        run: |
+          rm -f pkg.zip
+          rm -rf "$PKG"
+          du -sh compiled
+          df -h /
       - name: Upload compiled model (zip)
         uses: actions/upload-artifact@v4
         with:
           name: compiled-mlmodelc
-          path: compiled/
+          path: |
+            compiled/
+            compile.log
           retention-days: 7
