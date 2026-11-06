@@ -1,0 +1,147 @@
+{
+ "version": "device-v2",
+ "urlBase": "https://huggingface.co/sheigl/craftroom-ai-payload/resolve/main/device-v2",
+ "models": [
+  "Unet_ControlNet_canny1200_6bit.mlmodelc",
+  "Unet_ControlNet_canny1200_split_einsum_6bit.mlmodelc",
+  "VAEDecoder_sdxl_fp32.mlmodelc",
+  "embeds"
+ ],
+ "variants": {
+  "sdpa": {
+   "model": "Unet_ControlNet_canny1200_6bit.mlmodelc",
+   "group": "sdpa",
+   "label": "SDPA attention (default, shipping candidate)"
+  },
+  "split_einsum": {
+   "model": "Unet_ControlNet_canny1200_split_einsum_6bit.mlmodelc",
+   "group": "split_einsum",
+   "label": "split_einsum attention (A/B alternate)"
+  }
+ },
+ "defaultVariant": "sdpa",
+ "files": [
+  {
+   "path": "VAEDecoder_sdxl_fp32.mlmodelc/analytics/coremldata.bin",
+   "size": 243,
+   "sha256": "6c35c8147f6aac21c1ae540ce047fdc55f2c5878fcb067812c51e5bb38105885",
+   "group": "common"
+  },
+  {
+   "path": "VAEDecoder_sdxl_fp32.mlmodelc/coremldata.bin",
+   "size": 386,
+   "sha256": "b723cdaa050197a47edc09e167efa416c9e394aaa15c889868f13a7dc1e3d6ff",
+   "group": "common"
+  },
+  {
+   "path": "VAEDecoder_sdxl_fp32.mlmodelc/metadata.json",
+   "size": 2041,
+   "sha256": "be0b7fdfb1971632ffd73fd30744a3a840715c97edacf949ef4d02a657e5844e",
+   "group": "common"
+  },
+  {
+   "path": "VAEDecoder_sdxl_fp32.mlmodelc/model.mil",
+   "size": 176131,
+   "sha256": "24df1d605fb34a65f1fd2a4b70f8c6f093be8670fd5a62aec3678e0f10ba97c7",
+   "group": "common"
+  },
+  {
+   "path": "VAEDecoder_sdxl_fp32.mlmodelc/weights/weight.bin",
+   "size": 197977216,
+   "sha256": "03f9eca88a8c7db8b36dc0a51f7958393a5cb72cdebead44fb2dd887cc7e1609",
+   "group": "common"
+  },
+  {
+   "path": "embeds/encoder_hidden_states.f16",
+   "size": 630784,
+   "sha256": "5f52547ec0dc7e1ab8326992eb7712209e6139d428465084ae864cbfc930816b",
+   "group": "common"
+  },
+  {
+   "path": "embeds/text_embeds.f16",
+   "size": 5120,
+   "sha256": "047dcaf40ec4a64cb3d819cb5045d451199fb84c23c50fc67ec73c0dd56d7059",
+   "group": "common"
+  },
+  {
+   "path": "embeds/time_ids.f16",
+   "size": 24,
+   "sha256": "3818e48abba241c01368d6350695ccaf5e3ec5036e7380c517fdcbebabe37025",
+   "group": "common"
+  },
+  {
+   "path": "Unet_ControlNet_canny1200_6bit.mlmodelc/analytics/coremldata.bin",
+   "size": 243,
+   "sha256": "f19bdf31b52cdfc67d2a1cb0a2a4c894891caaf2bdcaecc32ec738afe38387bd",
+   "group": "sdpa"
+  },
+  {
+   "path": "Unet_ControlNet_canny1200_6bit.mlmodelc/coremldata.bin",
+   "size": 532,
+   "sha256": "12cfd50644f16c8748b2aad35328094919d77cccff294a816d2604152bbac631",
+   "group": "sdpa"
+  },
+  {
+   "path": "Unet_ControlNet_canny1200_6bit.mlmodelc/metadata.json",
+   "size": 3871,
+   "sha256": "8da18350830b97c73618ae3c3da3cef927a3e64b76df836cabcfb17bcab556dd",
+   "group": "sdpa"
+  },
+  {
+   "path": "Unet_ControlNet_canny1200_6bit.mlmodelc/model.mil",
+   "size": 3192795,
+   "sha256": "551beb223372c28b93833d217e85b8c25d1a07e01a97d3a35e04890de55d658e",
+   "group": "sdpa"
+  },
+  {
+   "path": "Unet_ControlNet_canny1200_6bit.mlmodelc/weights/weight.bin",
+   "size": 2867236672,
+   "sha256": "66bf237e6d132d9ad63ac466cdbfdd97f7d251f3f918ca01f5babd5272e361c0",
+   "group": "sdpa"
+  },
+  {
+   "path": "Unet_ControlNet_canny1200_split_einsum_6bit.mlmodelc/analytics/coremldata.bin",
+   "size": 243,
+   "sha256": "6d9e6b8ba1094a5779f2d116285f3c17b14d4fc46d40e162bbd1bd707ba66abb",
+   "group": "split_einsum"
+  },
+  {
+   "path": "Unet_ControlNet_canny1200_split_einsum_6bit.mlmodelc/coremldata.bin",
+   "size": 532,
+   "sha256": "7c1633d2fbd272e72d0dcc8c353774fe18ef0f08b75f15f1537a9b5349913efd",
+   "group": "split_einsum"
+  },
+  {
+   "path": "Unet_ControlNet_canny1200_split_einsum_6bit.mlmodelc/metadata.json",
+   "size": 3924,
+   "sha256": "11c452b3e41963ac496942c89c06ffae0b5afe21ffb449c5fc815b8509b6230a",
+   "group": "split_einsum"
+  },
+  {
+   "path": "Unet_ControlNet_canny1200_split_einsum_6bit.mlmodelc/model.mil",
+   "size": 25886948,
+   "sha256": "c4ac5d5448910beb03ae82e39e286c531248ae7c3f37e86438f2889b15c3c84d",
+   "group": "split_einsum"
+  },
+  {
+   "path": "Unet_ControlNet_canny1200_split_einsum_6bit.mlmodelc/weights/weight.bin",
+   "size": 2867236672,
+   "sha256": "66bf237e6d132d9ad63ac466cdbfdd97f7d251f3f918ca01f5babd5272e361c0",
+   "group": "split_einsum"
+  }
+ ],
+ "totalBytes": 5962354377,
+ "byteAccounting": {
+  "common": 198791945,
+  "sdpa": 2870434113,
+  "split_einsum": 2893128319,
+  "downloadSdpa": 3069226058,
+  "downloadSplitEinsum": 3091920264
+ },
+ "notes": [
+  "path is relative to urlBase; the harness may override urlBase from Documents/payload_base_url.txt (T5 LAN server)",
+  "sdpa and split_einsum share every file except the UNet model (identical weights, different attention op layout)",
+  "VAE decoder is fp32 and must run on cpuAndGPU (no ANE compute type)",
+  "VAE encoder omitted: the product path is txt2img from noise"
+ ]
+}

@@ -17,3 +17,9 @@ DerivedData/
 
 # macOS noise
 .DS_Store
+
+# Local-only canny fixture raw buffers (Linux `swift test` runs; the committed
+# PNGs in Core/Tests/.../Fixtures/canny are the source of truth).
+Core/Tests/CraftRoomCoreTests/Fixtures/canny/raw/
+# SwiftPM build products
+Core/.build/

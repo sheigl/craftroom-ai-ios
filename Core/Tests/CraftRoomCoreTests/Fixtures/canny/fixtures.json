@@ -1,0 +1,103 @@
+{
+ "schema": "craftroom.canny_fixtures.v1",
+ "recipe": {
+  "name": "canny_edge_v1",
+  "grayscale": "ITU-R 601 (cv2.COLOR_RGB2GRAY)",
+  "blur_ksize": 5,
+  "blur_sigma": 1.4,
+  "canny_low": 100,
+  "canny_high": 200,
+  "canny_gradient": "L1",
+  "dilate_kernel": 3,
+  "channels": 3,
+  "value_range": [
+   0.0,
+   1.0
+  ]
+ },
+ "pipeline": [
+  "PIL resize to long edge 768 (LANCZOS) \u2014 already at device dims here",
+  "cv2.cvtColor RGB->GRAY (ITU-R 601)",
+  "cv2.GaussianBlur 5x5 sigma 1.4 (BORDER_REFLECT_101 default)",
+  "cv2.Canny 100/200 L1 (aperture 3, Sobel BORDER_REPLICATE)",
+  "cv2.dilate 3x3 square (1 px)",
+  "mask replicated to 3 channels / 255"
+ ],
+ "generator": "sdxl/teacher/device_v2/make_canny_fixtures.py",
+ "opencv": "4.11.0",
+ "numpy": "2.5.4",
+ "fixtures": [
+  {
+   "name": "portrait_3x4",
+   "width": 576,
+   "height": 768,
+   "aspect": 0.75,
+   "edge_pixels": 9444,
+   "edge_ratio": 0.021349,
+   "input_png_bytes": 333813,
+   "input_png_sha256": "fe0082348a899784d9c120a8a35a140ae35da33aeb2af6f9723d5ff691d6f1da",
+   "edge_png_bytes": 3776,
+   "edge_png_sha256": "a20a042e92a829c18a88c61cd0d539279b224135a228b004785cfbc373216386"
+  },
+  {
+   "name": "portrait_9x16",
+   "width": 432,
+   "height": 768,
+   "aspect": 0.5625,
+   "edge_pixels": 24185,
+   "edge_ratio": 0.072896,
+   "input_png_bytes": 282183,
+   "input_png_sha256": "275803eb56d4876883063d48496f96f4fc87e10925b1770e2626d394386a4493",
+   "edge_png_bytes": 6475,
+   "edge_png_sha256": "2cc60b2dc835dc9d88669f408ee17cf25202a21256371a9ea8c3180a55caba08"
+  },
+  {
+   "name": "landscape_4x3",
+   "width": 768,
+   "height": 576,
+   "aspect": 1.333333,
+   "edge_pixels": 7749,
+   "edge_ratio": 0.017517,
+   "input_png_bytes": 401446,
+   "input_png_sha256": "87f88355888640193e9b7120d89e2949754b2dd366d90d55b21695fbd500ef2a",
+   "edge_png_bytes": 4282,
+   "edge_png_sha256": "dcb029e5a8b5fa8018a638c0f171f10c51711c1e0f52406233b0753d56595a6f"
+  },
+  {
+   "name": "landscape_16x9",
+   "width": 768,
+   "height": 432,
+   "aspect": 1.777778,
+   "edge_pixels": 24969,
+   "edge_ratio": 0.075259,
+   "input_png_bytes": 287433,
+   "input_png_sha256": "a7771240dc9c48fa90ed4ac83ddb96eafbd776811160fb26b60f40342b3b0e6a",
+   "edge_png_bytes": 4755,
+   "edge_png_sha256": "a06ece3b0c1be69998f1baac1dc0a36fb0e61c1441bf13834de54360fd3f1227"
+  },
+  {
+   "name": "animal_lowcontrast",
+   "width": 768,
+   "height": 576,
+   "aspect": 1.333333,
+   "edge_pixels": 4909,
+   "edge_ratio": 0.011097,
+   "input_png_bytes": 184629,
+   "input_png_sha256": "e0726232478982c973baab32e58e34fdc554b09788ec410f8fad3704b1b981a3",
+   "edge_png_bytes": 3672,
+   "edge_png_sha256": "f6f760c62237acf96a82a959dc554eda4d6fc65834fcff5225f0816fbefebc3a"
+  },
+  {
+   "name": "texture_dense",
+   "width": 768,
+   "height": 576,
+   "aspect": 1.333333,
+   "edge_pixels": 11380,
+   "edge_ratio": 0.025725,
+   "input_png_bytes": 1133022,
+   "input_png_sha256": "03b561944da5fac375a8276b44d5a3f24fa426b9bc6049cd617256117fa6e40a",
+   "edge_png_bytes": 5446,
+   "edge_png_sha256": "f7c1d216e42e7e183568716958d2f507613a98398d3ee0a09812a3125f844e15"
+  }
+ ]
+}
