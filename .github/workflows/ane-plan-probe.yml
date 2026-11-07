@@ -1,0 +1,171 @@
+# CI ANE plan probe (device-v2 UNet+ControlNet).
+#
+# Answers "does the Neural Engine accept our graph, and do palettized weights
+# stay packed?" on a macOS runner that has an ANE — i.e. without another
+# TestFlight install. Design and interpretation table:
+# sdxl/teacher/device_v2/ci/ANE_PROBE.md in the Linux repo (craftroom-ai).
+#
+# Standalone: it never touches build.yml, testflight.yml or
+# compile-mlpackage.yml, and it changes no app code.
+#
+# Input: the release-asset URLs of a multi-part .zip holding exactly one
+# .mlpackage (the same concatenate-then-unzip contract as compile-mlpackage.yml).
+# Output: an artifact with the probe log (PLAN / UNSUPPORTED / FORWARD / SUMMARY).
+#
+# The job fails only if the probe cannot run at all (swiftc build error, or no
+# PLAN line at all). A crashed or refused forward is the measurement.
+
+name: ane-plan-probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      parts:
+        description: >-
+          Release asset URLs of the zip parts, comma- (or space-) separated.
+          Parts are concatenated in order into one .zip, then unzipped.
+        required: true
+        type: string
+      package_name:
+        description: >-
+          .mlpackage folder name inside the zip
+          (e.g. Unet_ControlNet_canny1200_6bit.mlpackage).
+          Leave empty to auto-detect the single .mlpackage in the tree.
+        required: false
+        default: ""
+        type: string
+      label:
+        description: Variant label echoed in every PLAN/FORWARD line (e.g. 6bit-split-einsum)
+        required: true
+        default: unlabeled
+        type: string
+
+concurrency:
+  group: ane-plan-probe-${{ inputs.label }}
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: macos-15
+    timeout-minutes: 120
+    env:
+      LABEL: ${{ inputs.label }}
+      PKG_INPUT: ${{ inputs.package_name }}
+      PARTS: ${{ inputs.parts }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Runner inventory
+        run: |
+          sw_vers
+          uname -m
+          xcrun --sdk macosx --show-sdk-version
+          sysctl -n hw.memsize | awk '{printf "ram_gb=%.1f\n", $1/1073741824}'
+          df -h /
+          echo "label=$LABEL package_input=${PKG_INPUT:-<auto>}"
+
+      - name: Download and concatenate parts
+        run: |
+          set -euo pipefail
+          rm -f pkg.zip
+          parts="${PARTS//,/ }"
+          if [ -z "${parts// /}" ]; then
+            echo "::error::no part URLs given"
+            exit 1
+          fi
+          i=0
+          for url in $parts; do
+            echo "part $i <- $url"
+            curl -L --retry 3 --retry-delay 5 --fail -o "part-$i.bin" "$url"
+            cat "part-$i.bin" >> pkg.zip
+            rm -f "part-$i.bin"
+            i=$((i+1))
+          done
+          ls -l pkg.zip
+          unzip -tq pkg.zip > /dev/null
+          echo "zip integrity ok ($i part(s))"
+          df -h /
+
+      - name: Unzip package
+        run: |
+          set -euo pipefail
+          unzip -q pkg.zip
+          rm -f pkg.zip
+          df -h /
+          # Resolve the package folder: explicit input wins, otherwise the only
+          # .mlpackage in the tree. Written to $GITHUB_ENV for later steps.
+          if [ -n "${PKG_INPUT}" ]; then
+            pkg="${PKG_INPUT}"
+          else
+            pkg=$(find . -maxdepth 3 -type d -name '*.mlpackage' | head -n 1)
+          fi
+          if [ -z "$pkg" ] || [ ! -d "$pkg" ]; then
+            echo "::error::no .mlpackage found (looked for '${PKG_INPUT:-*.mlpackage}')"
+            find . -maxdepth 2 | head -20
+            exit 1
+          fi
+          echo "PKG=$pkg" >> "$GITHUB_ENV"
+          echo "resolved package: $pkg"
+          du -sh "$pkg"
+          shasum -a 256 "$pkg/Data/com.apple.CoreML/weights/weight.bin" || true
+          plutil -p "$pkg/Manifest.json" | head -40 || true
+
+      - name: Compile with coremlcompiler
+        run: |
+          set -o pipefail
+          mkdir -p compiled
+          xcrun coremlcompiler compile "$PKG" compiled/ 2>&1 | tee compile.log
+          echo "--- compiled tree ---"
+          find compiled -maxdepth 2 -name '*.mlmodelc' -type d
+          du -sh compiled/*
+          # The .mlpackage is no longer needed and costs ~3 GB of runner disk.
+          rm -rf "$PKG"
+          df -h /
+
+      - name: Build probe (swiftc)
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          xcrun swiftc -O -parse-as-library scripts/ane_plan_probe.swift -o build/ane_plan_probe
+          ls -l build/ane_plan_probe
+
+      - name: Run probe
+        run: |
+          set -uo pipefail
+          : > probe.log
+          model=$(find compiled -maxdepth 2 -name '*.mlmodelc' -type d | head -n 1)
+          echo "INFO model=$model" | tee -a probe.log
+          if [ -z "$model" ]; then
+            echo "::error::no .mlmodelc to probe"
+            exit 1
+          fi
+          # The log is the deliverable: a forward that throws (ANE refusal,
+          # >RAM footprint) must not turn the job red.
+          ./build/ane_plan_probe "$model" --label "$LABEL" 2>&1 | tee -a probe.log
+          rc=${PIPESTATUS[0]}
+          echo "PROBE_EXIT=$rc" | tee -a probe.log
+          if ! grep -q '^PLAN ' probe.log; then
+            echo "::error::probe produced no PLAN line — the binary did not run"
+            exit 1
+          fi
+          exit 0
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "### ANE plan probe — $LABEL"
+            echo '```'
+            grep -E '^(PLAN |  UNSUPPORTED|FORWARD |SUMMARY|  SUMMARY|INFO |PROBE_EXIT)' probe.log 2>/dev/null | head -80 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload probe log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ane-plan-probe-${{ inputs.label }}
+          path: |
+            probe.log
+            compile.log
+          retention-days: 14
