@@ -93,7 +93,7 @@ enum PlanProbe {
             }
             watch.stop()
         }
-        if done.wait(timeout: .now() + Self.planTimeoutSeconds) == .timedOut {
+        if done.wait(timeout: .now() + .seconds(Self.planTimeoutSeconds)) == .timedOut {
             LadderLog.append(ComputePlanLine.failed(variant: variant.rawValue,
                 units: units.rawValue,
                 error: "plan-timeout-\(Self.planTimeoutSeconds)s"))
