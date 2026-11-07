@@ -162,7 +162,7 @@ final class MemoryPreflightTests: XCTestCase {
             XCTAssertTrue(e.refuses)
             let d = MemoryPreflight.decideCell(units: "cpuOnly", modelName: model,
                                                headroomMB: 12_273)
-            XCTAssertEqual(d, .skip(MemoryPreflight.cpuDequantReason),
+            XCTAssertEqual(d, .skip(reason: MemoryPreflight.cpuDequantReason),
                            "never load a UNet on CPU on the test iPad — even at full budget")
         }
         XCTAssertNil(MemoryPreflight.estimate(units: "cpuOnly", modelName: "VAEDecoder_sdxl_fp32"),
@@ -189,7 +189,7 @@ final class MemoryPreflightTests: XCTestCase {
             "12.3 GB available > 8,750 MB needed")
         XCTAssertEqual(MemoryPreflight.decideCell(units: "cpuAndNeuralEngine",
             modelName: "Unet_ControlNet_canny1200_fp16", headroomMB: 8_000),
-            .skip(MemoryPreflight.fp16WeightsReason),
+            .skip(reason: MemoryPreflight.fp16WeightsReason),
             "8 GB available < 8,750 MB needed → jetsam is certain — skip")
         XCTAssertEqual(MemoryPreflight.decideCell(units: "cpuAndNeuralEngine",
             modelName: "Unet_ControlNet_canny1200_fp16", headroomMB: 8_750), .attempt,
