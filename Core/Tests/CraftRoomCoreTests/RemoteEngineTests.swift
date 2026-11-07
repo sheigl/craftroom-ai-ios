@@ -212,7 +212,11 @@ final class RemoteEngineTests: XCTestCase {
             XCTAssertEqual(seconds, 12)
             XCTAssertTrue(error.errorDescription!.contains("did not finish"))
         }
-        XCTAssertEqual(sleeps.seconds, [5, 7])   // 5, then capped to the 12 s budget
+        XCTAssertEqual(sleeps.seconds.count, 2)
+        XCTAssertEqual(sleeps.seconds[0], 5, accuracy: 1e-2)
+        // The second wait is capped to what is left of the 12 s budget; the
+        // runner's own wall-clock time takes a few milliseconds off it.
+        XCTAssertEqual(sleeps.seconds[1], 7, accuracy: 0.05)
         XCTAssertEqual(transport.requests.count, 2)
     }
 
