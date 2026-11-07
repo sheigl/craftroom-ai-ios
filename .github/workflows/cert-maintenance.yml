@@ -1,0 +1,78 @@
+# App Store Connect certificate housekeeping for the ephemeral-runner problem:
+# every testflight run signs on a fresh macOS runner with CODE_SIGN_STYLE
+# Automatic, so Xcode creates a NEW certificate each time and the account
+# (Apple Distribution: 3, Apple Development: 2) hits its ceiling. This
+# workflow lists certificates on dispatch; revocation happens only when a
+# certificate id is passed explicitly.
+name: cert-maintenance
+
+on:
+  workflow_dispatch:
+    inputs:
+      revoke_id:
+        description: App Store Connect certificate id to DELETE (empty = list only)
+        required: false
+        default: ""
+        type: string
+
+jobs:
+  certs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: JWT for the ASC API key
+        id: jwt
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          pip install pyjwt cryptography --quiet
+          python3 - <<'PY'
+          import json, time, jwt, os, base64
+          key = os.environ["ASC_KEY_P8"].strip()
+          try:
+              key = base64.b64decode(key).decode()          # secret stored base64 (as testflight.yml decodes it)
+          except Exception:
+              pass                                           # already raw PEM
+          if "\\n" in key and "\n" not in key:
+              key = key.replace("\\n", "\n")
+          now = int(time.time())
+          tok = jwt.encode(
+              {"iss": os.environ["ASC_ISSUER_ID"], "iat": now, "exp": now + 500,
+               "aud": "appstoreconnect-v1", "bid": "craftroom-ci"},
+              key, algorithm="ES256",
+              headers={"kid": os.environ["ASC_KEY_ID"], "typ": "JWT"})
+          with open(os.environ["GITHUB_ENV"], "a") as f:
+              f.write("ASC_JWT=%s\n" % tok)
+          PY
+
+      - name: List certificates
+        env:
+          T: ${{ env.ASC_JWT }}
+        run: |
+          set -euo pipefail
+          for TYPE in DISTRIBUTION DEVELOPMENT; do
+            echo "=== $TYPE ==="
+            curl -sS -H "Authorization: Bearer $T" \
+              "https://api.appstoreconnect.apple.com/v1/certificates?filter[certificateType]=$TYPE&limit=100" \
+              | python3 -c 'import json,sys
+          d = json.load(sys.stdin)
+          if "errors" in d: print(json.dumps(d["errors"], indent=1)); raise SystemExit(1)
+          for c in d.get("data", []):
+              a = c["attributes"]
+              print(c["id"], a["certificateType"], a["name"], a["displayName"],
+                    "expires", a["expiresDateTime"][:10], "serial", a.get("serialNumber"))'
+          done
+
+      - name: Revoke (only when an id was supplied)
+        if: ${{ github.event.inputs.revoke_id != '' }}
+        env:
+          T: ${{ env.ASC_JWT }}
+          REVOKE_ID: ${{ github.event.inputs.revoke_id }}
+        run: |
+          set -euo pipefail
+          curl -sS -X DELETE -H "Authorization: Bearer $T" \
+            "https://api.appstoreconnect.apple.com/v1/certificates/$REVOKE_ID" \
+            | head -c 800
+          echo
