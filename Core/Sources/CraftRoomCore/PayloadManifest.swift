@@ -32,6 +32,10 @@ public struct PayloadManifestV2: Codable, Equatable {
         public let model: String
         public let group: String
         public let label: String
+        /// `mlmodelc` (default) or `mlpackage` — see `ModelForm`. Optional in
+        /// the JSON so every manifest written before build 10 keeps decoding
+        /// unchanged; absence means the compiled form.
+        public let form: ModelForm?
     }
 
     public let version: String
@@ -41,6 +45,12 @@ public struct PayloadManifestV2: Codable, Equatable {
     public let defaultVariant: String
     public let files: [FileEntry]
     public let totalBytes: Int64
+    /// Optional per-model shipping form (build 10's plan B):
+    /// `"modelForms": {"VAEDecoder_sdxl_fp32.mlmodelc": "mlpackage"}` makes the
+    /// app download that `.mlpackage` tree and compile it on the device.
+    /// Absent — the served manifest today — means every model is the compiled
+    /// `mlmodelc` form, exactly as before.
+    public let modelForms: [String: ModelForm]?
 
     public enum ManifestError: Error, Equatable, CustomStringConvertible {
         case unsupportedVersion(String)
@@ -73,6 +83,35 @@ public struct PayloadManifestV2: Codable, Equatable {
     public func modelDirectory(forVariant key: String) throws -> String {
         guard let variant = variants[key] else { throw ManifestError.noSuchVariant(key) }
         return variant.model
+    }
+
+    /// How that model directory is shipped: compiled `mlmodelc` unless the
+    /// manifest entry says otherwise (build 10's `mlpackage` plan B).
+    public func form(forVariant key: String) throws -> ModelForm {
+        guard let variant = variants[key] else { throw ManifestError.noSuchVariant(key) }
+        return variant.form ?? .mlmodelc
+    }
+
+    /// Shipping form of a model directory looked up by name, accepting the name
+    /// with or without an extension and consulting `modelForms` first, then the
+    /// variant entries. Unknown models are the compiled form (the default).
+    public func form(forModelNamed name: String) -> ModelForm {
+        let stem = Self.modelStem(name)
+        if let forms = modelForms {
+            for (key, form) in forms where Self.modelStem(key) == stem { return form }
+        }
+        for (_, variant) in variants where Self.modelStem(variant.model) == stem {
+            return variant.form ?? .mlmodelc
+        }
+        return .mlmodelc
+    }
+
+    /// `Foo.mlmodelc` / `Foo.mlpackage` / `Foo` all identify the same model.
+    public static func modelStem(_ name: String) -> String {
+        for ext in [".mlmodelc", ".mlpackage"] where name.hasSuffix(ext) {
+            return String(name.dropLast(ext.count))
+        }
+        return name
     }
 
     /// Absolute download URL for one entry against a base (override or default).

@@ -1,17 +1,17 @@
 {
-  "comment": "Bundled T5 ladder (build 9): units {cpuOnly, cpuAndNeuralEngine} x model {sdpa, split_einsum} x steps {1, 5, 30}, fast cells first. Same protocol as Documents/auto.json, which still wins if pushed. Runs once; relaunch is blocked by Documents/auto_default.done.",
+  "comment": "Bundled T5 ladder (build 10): ANE cells FIRST (the product path), cpuOnly cells LAST. Plain cpuOnly 6-bit cells are refused before loading by the fp16-dequant memory preflight (≈7.25 GiB fresh + margin > headroom); the one forced cell at the end (force:true) overrides it to run the decisive test — crash = hypothesis A confirmed, the cursor stops the loop. Same protocol as Documents/auto.json, which still wins if pushed. Runs once; relaunch is blocked by Documents/auto_default.done.",
   "cells": [
-    {"units": "cpuOnly",            "model": "sdpa",         "steps": 1,  "seed": 42},
-    {"units": "cpuOnly",            "model": "split_einsum", "steps": 1,  "seed": 42},
     {"units": "cpuAndNeuralEngine", "model": "sdpa",         "steps": 1,  "seed": 42},
     {"units": "cpuAndNeuralEngine", "model": "split_einsum", "steps": 1,  "seed": 42},
-    {"units": "cpuOnly",            "model": "sdpa",         "steps": 5,  "seed": 42},
-    {"units": "cpuOnly",            "model": "split_einsum", "steps": 5,  "seed": 42},
     {"units": "cpuAndNeuralEngine", "model": "sdpa",         "steps": 5,  "seed": 42},
     {"units": "cpuAndNeuralEngine", "model": "split_einsum", "steps": 5,  "seed": 42},
-    {"units": "cpuOnly",            "model": "sdpa",         "steps": 30, "seed": 42},
-    {"units": "cpuOnly",            "model": "split_einsum", "steps": 30, "seed": 42},
     {"units": "cpuAndNeuralEngine", "model": "sdpa",         "steps": 30, "seed": 42},
-    {"units": "cpuAndNeuralEngine", "model": "split_einsum", "steps": 30, "seed": 42}
+    {"units": "cpuAndNeuralEngine", "model": "split_einsum", "steps": 30, "seed": 42},
+    {"units": "cpuOnly",            "model": "sdpa",         "steps": 1,  "seed": 42},
+    {"units": "cpuOnly",            "model": "split_einsum", "steps": 1,  "seed": 42},
+    {"units": "cpuOnly",            "model": "sdpa",         "steps": 5,  "seed": 42},
+    {"units": "cpuOnly",            "model": "split_einsum", "steps": 5,  "seed": 42},
+    {"units": "cpuOnly",            "model": "sdpa",         "steps": 30, "seed": 42, "force": true},
+    {"units": "cpuOnly",            "model": "split_einsum", "steps": 30, "seed": 42, "force": true}
   ]
 }

@@ -172,16 +172,43 @@ final class PayloadStore: NSObject, URLSessionDataDelegate {
         return true
     }
 
-    /// The downloaded `.mlmodelc` directory for the loader, nil until every
-    /// file of that model is complete. Accepts the manifest model name with or
-    /// without the `.mlmodelc` extension.
+    /// What `MLModel` needs for one payload model name.
+    enum ModelSource {
+        /// a downloaded, already-compiled `.mlmodelc` (the served form today)
+        case compiled(URL)
+        /// a downloaded `.mlpackage` source: compile on device first (plan B)
+        case package(URL)
+    }
+
+    /// The loader's entry point: the installed directory for a model, in the
+    /// shipping form the manifest declares for it (`form`, default `mlmodelc`).
+    func modelSource(named: String) -> ModelSource? {
+        guard let dir = modelDir(named: named) else { return nil }
+        let form = manifestV2?.form(forModelNamed: named) ?? .mlmodelc
+        return form.needsDeviceCompile ? .package(dir) : .compiled(dir)
+    }
+
+    /// Weight bytes of the **selected variant** only — the honest number for a
+    /// load line, where `Diagnostics.bundledWeightBytes()` also counts stale
+    /// `weight.bin` files of an older payload still sitting in the store.
+    var variantWeightBytes: Int64 {
+        entries.filter { $0.path.hasSuffix("weight.bin") }.reduce(0) { $0 + $1.size }
+    }
+
+    /// The downloaded model directory for the loader, nil until every file of
+    /// that model is complete. Accepts the manifest model name with or without
+    /// its extension; the extension that is looked for follows the manifest's
+    /// `form` (`.mlpackage` when a model is served as a source package).
     func modelDir(named: String) -> URL? {
         if let m = manifestV2 {
-            let wanted = named.hasSuffix(".mlmodelc") ? named : named + ".mlmodelc"
+            let stem = PayloadManifestV2.modelStem(named)
+            let ext = m.form(forModelNamed: named).needsDeviceCompile
+                ? ".mlpackage" : ".mlmodelc"
+            let wanted = stem + ext
             let modelDirName: String
-            if m.models.contains(wanted) {
+            if m.models.contains(wanted) || entries.contains(where: { $0.path.hasPrefix(wanted + "/") }) {
                 modelDirName = wanted
-            } else if let first = entries.first(where: { $0.path.hasPrefix(named) }) {
+            } else if let first = entries.first(where: { $0.path.hasPrefix(stem) }) {
                 let head = first.path.split(separator: "/").first.map(String.init) ?? wanted
                 modelDirName = head
             } else {

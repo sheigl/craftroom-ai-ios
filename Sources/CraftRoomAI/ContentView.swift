@@ -318,6 +318,8 @@ struct ContentView: View {
         var variant: AttentionVariant
         var steps: Int
         var seed: UInt64
+        /// Overrides the estimated-skip preflight (auto.json `"force": true`).
+        var force: Bool = false
 
         var label: String { "\(units.rawValue)/\(variant.rawValue)/\(steps)" }
     }
@@ -325,6 +327,10 @@ struct ContentView: View {
     @State private var autoStarted = false
     @State private var autoWaitLogged = false
     @State private var autoDim = false
+    /// The crash cursor of this launch's ladder (see `LadderStore`): written to
+    /// `Documents/ladder_cursor.json` before every cell so a jetsam kill after
+    /// this line is attributable to a named cell.
+    @State private var ladderCursor: LadderCursor?
 
     private static func units(from s: String?) -> ComputeUnitsOption {
         switch s {
@@ -345,16 +351,16 @@ struct ContentView: View {
             .first?.appendingPathComponent("auto.json")
     }
 
-    /// Written after a BUNDLED ladder completes so a relaunch never repeats
-    /// the hours-long matrix (the pushed-file equivalent is the rename to
-    /// auto.done.json).
-    private static func autoDefaultDoneURL() -> URL? {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)
-            .first?.appendingPathComponent("auto_default.done")
-    }
+    /// Written after a BUNDLED ladder finishes so a relaunch never repeats the
+    /// hours-long matrix (the pushed-file equivalent is the rename to
+    /// auto.done.json). Build 10: it is written when the *cursor* is exhausted
+    /// (every cell done, failed or skipped), not merely when a loop pass ends —
+    /// a cell that kills the process must not restart the matrix forever.
+    private static func autoDefaultDoneURL() -> URL? { LadderStore.defaultDoneURL }
 
-    /// `{"cells":[{units, model, steps, seed}, …]}` — same protocol for the
-    /// pushed auto.json and the bundled auto_default.json.
+    /// `{"cells":[{units, model, steps, seed, force}, …]}` — same protocol for
+    /// the pushed auto.json and the bundled auto_default.json. `force:true`
+    /// overrides the build-10 estimated-skip preflight for that cell.
     private static func parseCells(_ data: Data) -> [AutoCell]? {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let raw = root["cells"] as? [[String: Any]], !raw.isEmpty else { return nil }
@@ -363,7 +369,8 @@ struct ContentView: View {
                      variant: Self.variant(from: c["model"] as? String),
                      steps: max(1, min(30, (c["steps"] as? NSNumber)?.intValue
                                         ?? (c["maxSteps"] as? NSNumber)?.intValue ?? 30)),
-                     seed: (c["seed"] as? NSNumber)?.uint64Value ?? 42)
+                     seed: (c["seed"] as? NSNumber)?.uint64Value ?? 42,
+                     force: (c["force"] as? NSNumber)?.boolValue ?? false)
         }
     }
 
@@ -393,7 +400,8 @@ struct ContentView: View {
         return AutoCell(units: Self.units(from: val("--units")),
                         variant: Self.variant(from: val("--model")),
                         steps: max(1, min(30, Int(val("--steps") ?? "30") ?? 30)),
-                        seed: UInt64(val("--seed") ?? "42") ?? 42)
+                        seed: UInt64(val("--seed") ?? "42") ?? 42,
+                        force: a.contains("--force"))
     }
 
     private func maybeStartAuto() {
@@ -402,29 +410,78 @@ struct ContentView: View {
         guard case .ready = payload else {
             if !autoWaitLogged {
                 autoWaitLogged = true
-                Diagnostics.log("auto: waiting for payload install")
-                Telemetry.send("auto: waiting for payload install (base \(PayloadStore.shared.baseURL))")
+                LadderLog.instrument("auto: waiting for payload install "
+                                     + "(base \(PayloadStore.shared.baseURL))")
             }
             return
         }
         autoStarted = true
         guard let url = Bundle.main.url(forResource: "test_photo", withExtension: "jpg"),
               let img = UIImage(contentsOfFile: url.path) else {
-            Diagnostics.log("ERROR auto: bundled test_photo.jpg missing")
+            LadderLog.append("ERROR auto: bundled test_photo.jpg missing")
             return
         }
+
+        // ---- crash cursor: the anti-crash-loop (build 10) ------------------
+        // A launch-arg run is one deliberate cell (pdm3/USB) and stays
+        // cursor-free; the unattended matrices are the thing that looped.
+        var cursor: LadderCursor?
+        if auto.source != .launchArgs {
+            let labels = cells.map(\.label)
+            let id = LadderCursor.ladderID(for: labels)
+            var c = LadderStore.load(matching: id) ?? LadderCursor(ladderID: id, labels: labels)
+            let carried = c.cells.contains { $0.attempts > 0 || $0.state != .pending }
+            for r in c.recoverAfterRestart() {
+                LadderLog.append("AUTO-FAIL cell=\(r.label) reason=process-restart"
+                    + " (attempt \(r.attempts))"
+                    + (r.willRetry ? " → one retry left" : " → giving up, advancing"))
+            }
+            if carried {
+                LadderLog.append("auto: resuming existing cursor (\(c.summary()))")
+            }
+            if c.isComplete {
+                // Every cell settled: this launch must NOT run anything. The
+                // line below is the proof the crash loop is closed.
+                LadderLog.append("auto: cursor exhausted (\(c.summary())) — not restarting"
+                    + " the ladder [\(auto.source)] \(cells.count) cell(s)")
+                if auto.source == .bundled {
+                    LadderStore.markDefaultDone("cursor exhausted: \(c.summary())")
+                }
+                LadderStore.save(c)
+                Telemetry.send(Telemetry.deliverySummary)
+                status = "Ladder already finished — see ladder.log."
+                logText = Diagnostics.tail()
+                return
+            }
+            cursor = c
+            LadderStore.save(c)
+        }
+        ladderCursor = cursor
+
         autoDim = true
         let startLine = "auto: \(cells.count) cell(s) [\(auto.source)] — "
             + cells.map(\.label).joined(separator: " · ")
-        run(preferredPhoto: img, ladder: cells, ladderSource: auto.source)
-        Diagnostics.log(startLine)
-        Telemetry.send(startLine)
+        run(preferredPhoto: img, ladder: cells, ladderSource: auto.source, cursor: cursor)
+        LadderLog.append(startLine)
     }
 
     // MARK: run
 
+    /// One pass over the ladder. Build 10 changed the loop from "run everything,
+    /// abort on the first error" to "run what the cursor still allows, and let a
+    /// dead cell be a data point":
+    ///
+    ///  * cells already settled by an earlier process are skipped (`RESUME-SKIP`);
+    ///  * a `cpuOnly` cell whose de-quantized fp16 estimate does not fit the
+    ///    remaining headroom is refused without attempting it (`AUTO-SKIP`);
+    ///  * every attempt is announced with `START cell=… attempt=N` *before* the
+    ///    load, and the cursor is on disk first, so a kill is attributable;
+    ///  * an error marks the cell failed and the pass continues (3 in a row
+    ///    stops the pass — a doomed matrix should not burn 12 loads);
+    ///  * the run-once marker is written only when the cursor is exhausted.
     private func run(preferredPhoto: UIImage? = nil, ladder: [AutoCell]? = nil,
-                     ladderSource: AutoSource = .documents) {
+                     ladderSource: AutoSource = .documents,
+                     cursor initialCursor: LadderCursor? = nil) {
         guard let photo = preferredPhoto ?? photo else { return }
         let cells = ladder ?? [AutoCell(
             units: units,
@@ -433,25 +490,64 @@ struct ContentView: View {
             seed: UInt64(seedText.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 42)]
         let auto = ladder != nil
         let force = forceLoad
+        var cursor = initialCursor
         running = true
         Task.detached(priority: .userInitiated) {
             await MainActor.run { UIApplication.shared.isIdleTimerDisabled = true }
-            var aborted = false
+            if ladder != nil {
+                // The plan, in durable order: a reader can see the intended
+                // matrix even when the first cell kills the process.
+                for cell0 in cells { LadderLog.append("CELL \(cell0.label)") }
+                // Hypothesis gate before any 2.9 GB load: does a small
+                // macOS-compiled .mlmodelc load and run on this iPadOS at all?
+                LadderLog.instrument("selftest: VAEDecoder_sdxl_fp32 before cell 1")
+                SelfTest.runVAEOnce()
+            }
+            var didReset = false
+            var consecutiveFailures = 0
+            var stoppedEarly = false
             for (idx, cell) in cells.enumerated() {
-                if aborted { break }
                 var lastStage = "start"
-                if idx == 0 {
+                // ---- settled by an earlier process: do not re-run ----------
+                if let st = cursor?.state(idx), st != .pending {
+                    LadderLog.append("RESUME-SKIP cell=\(cell.label) reason=already-\(st.rawValue)")
+                    continue
+                }
+                // ---- estimated-skip preflight (cpuOnly + palettized only) ---
+                let headroom = Diagnostics.availableMemoryMB()
+                if let estimate = MemoryPreflight.cpuDequantEstimateMiB(
+                    units: cell.units.rawValue, modelName: cell.variant.modelName),
+                   case .skip(let reason) = MemoryPreflight.decide(
+                        headroomMB: headroom, estimateMB: estimate, force: cell.force || force) {
+                    cursor?.skip(idx)
+                    Self.persist(cursor)
+                    LadderLog.append(String(format:
+                        "AUTO-SKIP cell=%@ reason=%@ · %@ · footprint %.0f MB",
+                        cell.label, reason,
+                        MemoryPreflight.detail(headroomMB: headroom, estimateMB: estimate),
+                        Diagnostics.footprintMB()))
+                    continue
+                }
+                // ---- cursor first, then the START line, then the work ------
+                let attempt = cursor?.begin(idx) ?? 1
+                Self.persist(cursor)
+                let free = Diagnostics.availableMemoryMB().map { String(format: "%.0f", $0) }
+                    ?? "n/a"
+                LadderLog.append(String(format:
+                    "START cell=%@ attempt=%d index=%d/%d · footprint %.0f MB · headroom %@ MB",
+                    cell.label, attempt, idx + 1, cells.count,
+                    Diagnostics.footprintMB(), free))
+                if !didReset {
                     Diagnostics.reset("run on \(cell.label) seed \(cell.seed)"
                         + " photo \(Int(photo.size.width))x\(Int(photo.size.height))")
+                    didReset = true
                 } else {
-                    Diagnostics.log("=== cell \(idx + 1)/\(cells.count): \(cell.label)")
-                }
-                if idx == 0 && ladder != nil {
-                    for cell0 in cells { Self.appendLadder("CELL \(cell0.label)") }
+                    Diagnostics.log("=== cell \(idx + 1)/\(cells.count): \(cell.label)"
+                        + " attempt \(attempt)")
                 }
                 await MainActor.run {
                     stats = ""
-                    status = "Starting…"
+                    status = "Starting \(cell.label)…"
                     stage = "start"
                 }
                 do {
@@ -474,6 +570,9 @@ struct ContentView: View {
                     if auto || ladder != nil {
                         saved = Self.saveRender(img, cell: cell, seed: cell.seed)
                     }
+                    cursor?.settle(idx, .done)
+                    Self.persist(cursor)
+                    consecutiveFailures = 0
                     let line = auto ? Self.autoResult(s, cell) : ""
                     await MainActor.run {
                         result = img
@@ -481,46 +580,63 @@ struct ContentView: View {
                         stats = Self.format(s)
                         if let saved { savedName = saved }
                         if !line.isEmpty {
-                            Diagnostics.log(line)
-                            Self.appendLadder(line)
+                            LadderLog.append(line)
+                            if let saved { LadderLog.instrument("render saved \(saved)") }
                         }
                         logText = Diagnostics.tail()
                     }
                 } catch {
                     let msg = error.localizedDescription
                     let failedAt = lastStage
+                    cursor?.settle(idx, .failed)
+                    Self.persist(cursor)
+                    consecutiveFailures += 1
                     Diagnostics.log("ERROR at \(failedAt): \(msg)")
-                    Telemetry.send("ERROR at \(failedAt): \(msg)")
+                    LadderLog.append("FAILED cell=\(cell.label) attempt=\(attempt)"
+                        + " at \(failedAt): \(msg)")
                     await MainActor.run {
                         status = "\(failedAt) failed: \(msg)"
                         logText = Diagnostics.tail()
                     }
-                    aborted = true
+                    if consecutiveFailures >= Self.consecutiveFailureStop {
+                        LadderLog.append("auto: \(consecutiveFailures) consecutive failures"
+                            + " — stopping this pass (the cursor keeps the rest for"
+                            + " a relaunch)")
+                        stoppedEarly = true
+                        break
+                    }
                 }
             }
             if ladder != nil {
-                let done = "auto: ladder complete (\(cells.count) cell(s)"
-                    + (aborted ? ", aborted early" : "") + ")"
-                Diagnostics.log(done)
-                Self.appendLadder(done)
-                switch ladderSource {
-                case .launchArgs:
-                    break
-                case .documents:
-                    if let url = Self.autoJSONURL() {
-                        let doneURL = url.deletingLastPathComponent()
-                            .appendingPathComponent("auto.done.json")
-                        try? FileManager.default.removeItem(at: doneURL)
-                        try? FileManager.default.moveItem(at: url, to: doneURL)
+                let settled = cursor.map { $0.summary() } ?? "no cursor"
+                let complete = cursor?.isComplete ?? true
+                let done = "auto: pass complete (\(cells.count) cell(s)) · \(settled)"
+                    + (stoppedEarly ? " · stopped early" : "")
+                LadderLog.append(done)
+                if complete {
+                    switch ladderSource {
+                    case .launchArgs:
+                        break
+                    case .documents:
+                        if let url = Self.autoJSONURL() {
+                            let doneURL = url.deletingLastPathComponent()
+                                .appendingPathComponent("auto.done.json")
+                            try? FileManager.default.removeItem(at: doneURL)
+                            try? FileManager.default.moveItem(at: url, to: doneURL)
+                        }
+                    case .bundled:
+                        // run-once marker, written only once the cursor has no
+                        // cell left to try (build 9 wrote it after the first
+                        // pass, which hid an unfinished matrix)
+                        LadderStore.markDefaultDone("cursor: \(settled)")
                     }
-                case .bundled:
-                    // run-once marker: the bundled matrix must not restart on
-                    // a relaunch (mirrors the auto.json → auto.done.json move)
-                    if let marker = Self.autoDefaultDoneURL() {
-                        let text = "auto_default ladder complete \(Date())\n"
-                        try? text.data(using: .utf8)?.write(to: marker, options: .atomic)
-                    }
+                    LadderLog.append("auto: cursor exhausted (\(settled)) — relaunch will not loop")
+                } else {
+                    LadderLog.append("auto: cursor not exhausted (\(settled))"
+                        + " — a relaunch resumes it")
                 }
+                Telemetry.flush()
+                LadderLog.append(Telemetry.deliverySummary)
             }
             await MainActor.run {
                 running = false
@@ -531,24 +647,15 @@ struct ContentView: View {
         }
     }
 
-    /// Durable copy of the ladder results: phaseA.log is reset per launch, so
-    /// the cells also accumulate here (never truncated). Every line is also
-    /// POSTed to the LAN collector (fire-and-forget), which is how the T5
-    /// orchestrator watches the ladder without a USB cable.
-    private static func appendLadder(_ line: String) {
-        guard let url = FileManager.default.urls(for: .documentDirectory,
-                                                 in: .userDomainMask).first?
-            .appendingPathComponent("ladder.log") else { return }
-        let data = Data((line + "\n").utf8)
-        if let handle = try? FileHandle(forWritingTo: url) {
-            defer { try? handle.close() }
-            _ = try? handle.seekToEnd()
-            try? handle.write(contentsOf: data)
-        } else {
-            try? data.write(to: url, options: .atomic)
-        }
-        Telemetry.send(line)
+    /// The cursor on disk is always one step ahead of the work.
+    private static func persist(_ cursor: LadderCursor?) {
+        if let cursor { LadderStore.save(cursor) }
     }
+
+    /// How many failures in a row end a pass. A cell that merely *throws* (as
+    /// opposed to killing the process) used to abort the whole matrix, which
+    /// hid every later ANE cell behind one cpuOnly failure.
+    private static let consecutiveFailureStop = 3
 
     /// One machine-readable line per ladder cell. Keeps the v0.4 field names
     /// (`units=`, `median_forward_ms=`, `peak_mem_mb=`) and adds `model=` and
@@ -631,6 +738,12 @@ final class Engine {
              steps: Int = Spatial.defaultSteps) throws -> (UIImage, RunStats) {
         if inference == nil || loadedUnits != units || loadedVariant != variant {
             onStage("Loading \(variant.label) on \(units.label)…")
+            // Drop the outgoing models BEFORE loading: two UNets at once is
+            // 5.7 GB on a run whose whole question is headroom (build 10).
+            inference?.release()
+            inference = nil
+            loadedUnits = nil
+            loadedVariant = nil
             let inf = Inference()
             lastLoad = try inf.loadModels(units: units, variant: variant, force: forceLoad)
             inference = inf

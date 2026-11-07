@@ -98,15 +98,33 @@ final class Inference {
 
     /// Loads the variant's UNet (requested units) and the fp32 VAE decoder
     /// (`cpuAndGPU` by design — see contract §6.2).
+    ///
+    /// Build 10 instrumentation, because build 9 died *inside* the UNet load and
+    /// left nothing after its `load:` line:
+    ///
+    ///  * every load line goes to telemetry as well as `phaseA.log`;
+    ///  * `weights` now means **this variant's** weight files, not every
+    ///    `weight.bin` on disk (an old device-v1 payload left in Application
+    ///    Support inflated build 9's line by ~3.9 GB);
+    ///  * `estimate` is the CPU-backend de-quantized fp16 figure from
+    ///    `MemoryPreflight` — what a `cpuOnly` load really costs;
+    ///  * a `LoadWatchdog` logs `load in flight …` every 2 s across each
+    ///    blocking `MLModel(contentsOf:)`, which is the line that survives a
+    ///    jetsam kill.
     @discardableResult
     func loadModels(units: ComputeUnitsOption, variant: AttentionVariant,
                     force: Bool = true) throws -> Double {
         let t0 = Date()
-        let weightsMB = Double(Diagnostics.bundledWeightBytes()) / 1_048_576.0
+        let weightsMB = Double(PayloadStore.shared.variantWeightBytes) / 1_048_576.0
         let headroom = Diagnostics.availableMemoryMB()
         let headText = headroom.map { String(format: "%.0f", $0) } ?? "n/a"
-        Diagnostics.log(String(format: "load: %@ %@ · weights %.0f MB · headroom %@ MB",
-                               variant.label, units.rawValue, weightsMB, headText))
+        let estimate = MemoryPreflight.cpuDequantEstimateMiB(units: units.rawValue,
+                                                            modelName: variant.modelName)
+        let estText = estimate.map { String(format: " · estimate %.0f MB", $0) } ?? ""
+        LadderLog.instrument(String(format: "load: %@ %@ · weights %.0f MB · headroom %@ MB"
+            + " · footprint %.0f MB%@",
+            variant.label, units.rawValue, weightsMB, headText,
+            Diagnostics.footprintMB(), estText))
         if !force, let h = headroom, h < weightsMB + 700 {
             throw PipError.model(String(format:
                 "memory preflight: app budget %.0f MB < weights %.0f MB + 700 MB",
@@ -114,36 +132,69 @@ final class Inference {
         }
 
         let t = Date()
-        unet = try Self.loadModel(named: variant.modelName, units: units.pref)
-        Diagnostics.log("\(variant.modelName) loaded on \(units.rawValue) in "
+        unet = try Self.loadModel(named: variant.modelName, units: units.pref,
+                                 phase: "unet")
+        LadderLog.instrument("\(variant.modelName) loaded on \(units.rawValue) in "
             + String(format: "%.1f", Date().timeIntervalSince(t))
             + String(format: " s · footprint %.0f MB", Diagnostics.footprintMB()))
         // The VAE is fp32: ANE cannot execute it, so ask for CPU+GPU.
-        vaeDec = try Self.loadModel(named: "VAEDecoder_sdxl_fp32", units: .cpuAndGPU)
+        vaeDec = try Self.loadModel(named: "VAEDecoder_sdxl_fp32", units: .cpuAndGPU,
+                                    phase: "vae")
         scheduler = try EulerScheduler.bundled()
         try loadConditioning()
         self.variant = variant
         effectiveUnits = units
         let load = Date().timeIntervalSince(t0)
-        Diagnostics.log(String(format: "load done · %.1f s · footprint %.0f MB",
-                               load, Diagnostics.footprintMB()))
+        LadderLog.instrument(String(format: "load done · %.1f s · footprint %.0f MB"
+            + " · headroom %@ MB", load, Diagnostics.footprintMB(), headText))
         return load
     }
 
-    private static func loadModel(named: String, units: MLComputeUnits) throws -> MLModel {
+    /// Drops the loaded models so the next cell starts from a clean footprint:
+    /// two UNets at once (the outgoing ANE one plus the one being loaded) is
+    /// 5.7 GB of weights on a run whose entire question is memory headroom.
+    func release() {
+        unet = nil
+        vaeDec = nil
+        ehs = nil
+        txtEmbeds = nil
+        timeIds = nil
+        scheduler = nil
+    }
+
+    /// Loads one model by payload name, honouring the manifest's shipping form.
+    ///
+    /// `form: "mlmodelc"` (everything served today): the downloaded compiled tree
+    /// goes straight to `MLModel(contentsOf:)`. `form: "mlpackage"` (plan B): the
+    /// downloaded source package is compiled once on the device into
+    /// `Caches/DeviceCompiled/` and that cache is loaded.
+    ///
+    /// `phase` labels the footprint-watchdog lines around the blocking call.
+    static func loadModel(named: String, units: MLComputeUnits,
+                          phase: String = "load") throws -> MLModel {
         let cfg = MLModelConfiguration()
         cfg.computeUnits = units
-        if let dir = PayloadStore.shared.modelDir(named: named) {
-            do {
+        let watch = LoadWatchdog.start(model: named, phase: phase)
+        defer { watch.stop() }
+        do {
+            switch PayloadStore.shared.modelSource(named: named) {
+            case .compiled(let dir):
                 return try MLModel(contentsOf: dir, configuration: cfg)
-            } catch {
-                throw PipError.model("\(named) [\(units.rawValue)]: \(error.localizedDescription)")
+            case .package(let pkg):
+                let compiled = try DeviceCompiler.compiledURL(forModelNamed: named,
+                                                              sourcePackage: pkg)
+                return try MLModel(contentsOf: compiled, configuration: cfg)
+            case nil:
+                if let u = Bundle.main.url(forResource: named, withExtension: "mlmodelc") {
+                    return try MLModel(contentsOf: u, configuration: cfg)
+                }
+                throw PipError.model("not installed: \(named) — download the device-v2 payload")
             }
+        } catch {
+            // A jetsam kill never gets here; anything that *does* arrive has to
+            // be visible in telemetry, with the units that were asked for.
+            throw PipError.model("\(named) [\(units.rawValue)]: \(error.localizedDescription)")
         }
-        if let u = Bundle.main.url(forResource: named, withExtension: "mlmodelc") {
-            return try MLModel(contentsOf: u, configuration: cfg)
-        }
-        throw PipError.model("not installed: \(named) — download the device-v2 payload")
     }
 
     /// Baked fixed-prompt conditioning (contract §6.1): row 0 positive, row 1
@@ -218,8 +269,8 @@ final class Inference {
         return out
     }
 
-    private static func predict(_ model: MLModel,
-                                _ arrays: [String: MLMultiArray]) throws -> MLMultiArray {
+    static func predict(_ model: MLModel,
+                        _ arrays: [String: MLMultiArray]) throws -> MLMultiArray {
         var items: [String: MLFeatureValue] = [:]
         for (name, arr) in arrays { items[name] = MLFeatureValue(multiArray: arr) }
         let provider = try MLDictionaryFeatureProvider(dictionary: items)
