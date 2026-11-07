@@ -343,7 +343,8 @@ final class Inference {
 
     func generate(from image: UIImage, seed: UInt64,
                   steps: Int = Spatial.defaultSteps,
-                  onStage: ((String) -> Void)? = nil) throws -> (UIImage, RunStats) {
+                  onStage: ((String) -> Void)? = nil,
+                  onProgress: ((Stage, Double) -> Void)? = nil) throws -> (UIImage, RunStats) {
         guard let unet, let vaeDec, let scheduler, let ehs, let txtEmbeds, let timeIds else {
             throw PipError.model("models not loaded")
         }
@@ -359,6 +360,7 @@ final class Inference {
 
         // 1. source -> long edge 768, aspect preserved (Lanczos-3)
         onStage?("Preparing source (long edge \(Spatial.longEdge))…")
+        onProgress?(.preparing, 0.05)
         let tPrep = Date()
         let source = try ImageUtils.rgbAtLongEdge(image)
         let contentW = source.width, contentH = source.height
@@ -367,6 +369,7 @@ final class Inference {
         // 2. canny at that size
         let mask = try CannyEdgeV1.edgeMask(rgb: source.rgb,
                                            width: contentW, height: contentH)
+        onProgress?(.preparing, 1.0)
 
         // 3. centred zero-padded conditioning, both batch rows
         let planes = try CannyEdgeV1.conditionPlanes(mask: mask, width: contentW,
@@ -407,6 +410,7 @@ final class Inference {
         // 5. Euler loop, one batch-2 forward per step
         let totalSteps = max(1, min(steps, scheduler.steps))
         onStage?("Diffusion loop (\(totalSteps) steps, CFG \(Int(Spatial.guidanceScale)))…")
+        onProgress?(.rendering, 0)
         let tLoop = Date()
         var stepPeak: UInt64 = 0
         s.stepMillis.removeAll(keepingCapacity: true)
@@ -440,6 +444,7 @@ final class Inference {
             scheduler.step(&latents, eps: eps, index: i)
             s.stepMillis.append(Date().timeIntervalSince(tStep) * 1000)
             stepPeak = max(stepPeak, currentFootprint())
+            onProgress?(.rendering, Double(i + 1) / Double(totalSteps))
             if i % 5 == 0 || i == totalSteps - 1 {
                 let free = Diagnostics.availableMemoryMB()
                     .map { String(format: "%.0f", $0) } ?? "n/a"
@@ -453,6 +458,7 @@ final class Inference {
 
         // 6. decode (fp32 / cpuAndGPU — the VAE wrapper already divides by 0.13025)
         onStage?("VAE decode (768² fp32)…")
+        onProgress?(.finishing, 0.2)
         let tDec = Date()
         let latentsArray = try Self.f32Array(shape: [1, 4, Spatial.latentSide, Spatial.latentSide],
                                              values: latents)
@@ -465,6 +471,7 @@ final class Inference {
                                             canvas: Spatial.canvas,
                                             contentWidth: contentW,
                                             contentHeight: contentH)
+        onProgress?(.finishing, 1.0)
         peak = max(peak, currentFootprint())
         s.peakMemMB = max(s.peakMemMB, Double(peak) / 1_048_576.0)
         s.total = Date().timeIntervalSince(t0)

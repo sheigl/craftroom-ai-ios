@@ -69,6 +69,11 @@ jobs:
           if ! /usr/libexec/PlistBuddy -c "Print :UIFileSharingEnabled" Support/Info.plist; then
             echo "::warning::XcodeGen did not emit UIFileSharingEnabled — the packaging step repairs it"
           fi
+          # v0.6: both plain-HTTP LAN hosts must be excepted (payload download on
+          # .83, generation server on .92). A missing exception is an iOS-side
+          # block with no build error, so gate it here.
+          /usr/libexec/PlistBuddy -c "Print :NSAppTransportSecurity:NSExceptionDomains:192.168.68.83:NSExceptionAllowsInsecureHTTPLoads" Support/Info.plist
+          /usr/libexec/PlistBuddy -c "Print :NSAppTransportSecurity:NSExceptionDomains:192.168.68.92:NSExceptionAllowsInsecureHTTPLoads" Support/Info.plist
 
       - name: Build (unsigned, arm64 device)
         run: |

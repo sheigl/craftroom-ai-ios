@@ -11,8 +11,8 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5"
-    MARKETING_VERSION: "0.5.0"
-    CURRENT_PROJECT_VERSION: "11"
+    MARKETING_VERSION: "0.6.0"
+    CURRENT_PROJECT_VERSION: "12"
     TARGETED_DEVICE_FAMILY: "2"          # iPad
     IPHONEOS_DEPLOYMENT_TARGET: "17.0"
 # v0.5: the harness core (canny_edge_v1, baked Euler schedule, payload manifest
@@ -76,7 +76,7 @@ targets:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
-        NSPhotoLibraryUsageDescription: "Craft Room AI reads one photo you pick, to turn it into a coloring page. Everything stays on this iPad."
+        NSPhotoLibraryUsageDescription: "Craft Room AI reads one photo you pick, to turn it into a coloring page. On-device mode keeps everything on this iPad; Local server mode sends that one photo to the server you configure. "
         # TestFlight/App Store: the app ships no cryptography, so declare it
         # here. Without this key App Store Connect holds the build at
         # "Missing Compliance" until someone answers the export question in
@@ -87,17 +87,18 @@ targets:
         # report, so the log must be pullable from Finder.
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
-        # Build 9 (T5, no USB): the payload download and the wireless ladder
-        # telemetry talk plain HTTP to the LAN dev server (192.168.68.83:8123).
-        # Without an ATS exception iOS blocks the http:// loads outright, which
-        # is why build 8 could never start its download. Scoped to that one
-        # host — NSAllowsArbitraryLoads stays out. NSAllowsLocalNetworking is
-        # the documented companion for local-network loads (the exception-domain
-        # key is matched as a string, so it works for the IP literal too).
+        # v0.6 (T3.5): the local generation server also speaks plain HTTP, on
+        # desktop2 (`http://192.168.68.92:8124`). Both LAN hosts are excepted
+        # explicitly; NSAllowsArbitraryLoads stays out. `NSLocalNetworkUsageDescription`
+        # is the string iOS shows when the app first reaches the LAN.
+        NSLocalNetworkUsageDescription: "Craft Room AI connects to your local payload and generation servers on this network. Nothing leaves your LAN."
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
           NSExceptionDomains:
             192.168.68.83:
+              NSExceptionAllowsInsecureHTTPLoads: true
+              NSIncludesSubdomains: false
+            192.168.68.92:
               NSExceptionAllowsInsecureHTTPLoads: true
               NSIncludesSubdomains: false
     # Optional-but-load-bearing for Phase A: on a 12 GB iPad the default

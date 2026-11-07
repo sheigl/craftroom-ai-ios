@@ -1,4 +1,4 @@
-# Ship the Phase A harness to TestFlight.
+# Ship the app to TestFlight.
 #
 # Why this exists: the unsigned path in build.yml ends with Sideloadly on the
 # old Mac, which costs a cable, a free Apple ID, and a 7-day profile expiry —
@@ -16,16 +16,36 @@
 # The key must have the Admin (or App Manager) role: automatic signing creates
 # the distribution certificate and profile on the first run.
 #
-# Required once in App Store Connect (UI only — the API refuses
-# POST /v1/apps): an app record named "Craft Room AI" with bundle ID
-# com.sheigl.CraftRoomAI.
+# ---------------------------------------------------------------------------
+# CERTIFICATE POLICY (v0.6, fixes the 2026-11-07 churn)
 #
-# Payload: the three compiled models no longer ride inside the ipa (Apple's
-# ITMS-90558 4 GB thinned-bundle cap). They are published to the public HF
-# repo by scripts/publish_device_payload.py and downloaded on first launch
-# against Resources/device/device_manifest.json, which MUST be committed —
-# the app cannot fetch without it. The ipa now carries only the harness and
-# the small bins (~50 MB), so no payload cache is needed here.
+# Until 0.5.0 each `testflight` run used App Store Connect's automatic signing
+# with NO certificate in the keychain, so every ephemeral macOS runner minted a
+# fresh "Apple Development" certificate. Ten runs filled the account's slot
+# limit ("reached the maximum number of certificates") and needed a manual
+# revoke round (`cert-maintenance.yml`).
+#
+# The durable fix is a **persistent distribution certificate** stored as repo
+# secrets, imported into a throw-away keychain per run:
+#
+#   DIST_CERT_P12        base64 of a password-protected .p12 holding the
+#                        **Apple Distribution** certificate AND its private key
+#   DIST_CERT_PASSWORD   that .p12's password
+#   DIST_PROFILE         (optional) base64 of the App Store distribution
+#                        .mobileprovision for com.sheigl.CraftRoomAI
+#
+# With DIST_CERT_P12 set, `codesign` finds an existing distribution identity and
+# Xcode reuses it — no new certificate is created, ever. With DIST_PROFILE also
+# set, signing is fully manual (no portal mutation at all). Without the secrets
+# the workflow still ships, using the old automatic path, and emits a warning
+# annotation so the churn is visible instead of silent.
+#
+# One-time setup (owner, ~5 minutes) is documented in docs/SIGNING.md.
+# ---------------------------------------------------------------------------
+#
+# Payload: the models do NOT ride inside the ipa (Apple's ITMS-90558 4 GB
+# thinned-bundle cap). They are the on-device first-launch download; the v0.6
+# Local server engine needs no download at all.
 
 name: testflight
 
@@ -51,7 +71,11 @@ jobs:
       ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
       ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      DIST_CERT_P12: ${{ secrets.DIST_CERT_P12 }}
+      DIST_CERT_PASSWORD: ${{ secrets.DIST_CERT_PASSWORD }}
+      DIST_PROFILE: ${{ secrets.DIST_PROFILE }}
       BUILD_NUMBER: ${{ inputs.build_number != '' && inputs.build_number || github.run_number }}
+      BUNDLE_ID: com.sheigl.CraftRoomAI
     steps:
       - uses: actions/checkout@v4
 
@@ -62,6 +86,14 @@ jobs:
             if [ -z "${!v}" ]; then echo "::error::missing secret $v"; exit 1; fi
           done
           echo "team=$APPLE_TEAM_ID key=$ASC_KEY_ID build=$BUILD_NUMBER"
+          if [ -z "${DIST_CERT_P12:-}" ]; then
+            echo "::warning::DIST_CERT_P12 is not set — falling back to automatic signing, which mints a new Apple Development certificate on every run and will eventually exhaust the account's certificate slots. See docs/SIGNING.md."
+          elif [ -z "${DIST_CERT_PASSWORD:-}" ]; then
+            echo "::error::DIST_CERT_P12 is set but DIST_CERT_PASSWORD is empty"
+            exit 1
+          else
+            echo "persistent distribution certificate configured (profile: $([ -n "${DIST_PROFILE:-}" ] && echo yes || echo no))"
+          fi
 
       - name: Install App Store Connect key
         run: |
@@ -70,6 +102,62 @@ jobs:
           printf '%s' "$ASC_KEY_P8" | base64 -d > "$HOME/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8"
           chmod 600 "$HOME/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8"
 
+      # --------------------------------------------------------------- signing
+      # Import the persistent Apple Distribution identity into a temporary
+      # keychain and make it the first entry of the search list, so codesign
+      # (called from xcodebuild) actually sees it.
+      - name: Import distribution certificate
+        if: env.DIST_CERT_P12 != ''
+        run: |
+          set -euo pipefail
+          KEYCHAIN="$RUNNER_TEMP/dist-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          echo "$DIST_CERT_P12" | base64 -d > "$RUNNER_TEMP/dist.p12"
+          security import "$RUNNER_TEMP/dist.p12" -k "$KEYCHAIN" \
+            -P "$DIST_CERT_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          # Prepend to the existing list rather than replacing it.
+          EXISTING="$(security list-keychains -d user | tr -d '"' | tr '\n' ' ')"
+          # shellcheck disable=SC2086
+          security list-keychains -d user -s "$KEYCHAIN" $EXISTING
+          echo "--- codesigning identities in the temporary keychain ---"
+          security find-identity -v -p codesigning "$KEYCHAIN"
+          if ! security find-identity -v -p codesigning "$KEYCHAIN" \
+               | grep -q "Apple Distribution"; then
+            echo "::error::the imported .p12 has no Apple Distribution identity — regenerate it from the Apple Developer portal (docs/SIGNING.md)"
+            exit 1
+          fi
+          rm -f "$RUNNER_TEMP/dist.p12"
+          {
+            echo "SIGNING_KEYCHAIN=$KEYCHAIN"
+            echo "SIGNING_KEYCHAIN_PASSWORD=$KEYCHAIN_PASSWORD"
+          } >> "$GITHUB_ENV"
+
+      - name: Install provisioning profile
+        if: env.DIST_CERT_P12 != '' && env.DIST_PROFILE != ''
+        run: |
+          set -euo pipefail
+          PROFILE_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+          mkdir -p "$PROFILE_DIR"
+          echo "$DIST_PROFILE" | base64 -d > "$RUNNER_TEMP/dist.mobileprovision"
+          security cms -D -i "$RUNNER_TEMP/dist.mobileprovision" > "$RUNNER_TEMP/dist.plist"
+          PROFILE_UUID="$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$RUNNER_TEMP/dist.plist")"
+          PROFILE_NAME="$(/usr/libexec/PlistBuddy -c 'Print :Name' "$RUNNER_TEMP/dist.plist")"
+          PROFILE_APP="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' "$RUNNER_TEMP/dist.plist")"
+          echo "profile: $PROFILE_NAME ($PROFILE_UUID) for $PROFILE_APP"
+          case "$PROFILE_APP" in
+            "$APPLE_TEAM_ID.$BUNDLE_ID") ;;
+            *) echo "::error::the profile is for $PROFILE_APP, not $APPLE_TEAM_ID.$BUNDLE_ID"; exit 1 ;;
+          esac
+          cp "$RUNNER_TEMP/dist.mobileprovision" "$PROFILE_DIR/$PROFILE_UUID.mobileprovision"
+          echo "PROFILE_SPECIFIER=$PROFILE_NAME" >> "$GITHUB_ENV"
+          rm -f "$RUNNER_TEMP/dist.mobileprovision" "$RUNNER_TEMP/dist.plist"
+
       - name: Install xcodegen
         run: brew install xcodegen
 
@@ -77,8 +165,8 @@ jobs:
         run: xcodegen generate
 
       # Same gate as the unsigned build: a silently-defaulted Info.plist
-      # (the `props` bug) already cost two device round-trips. For a signed
-      # build this matters more — the plist cannot be repaired after signing.
+      # (`props` typo) already cost two device round-trips. For a signed build
+      # this matters more — the plist cannot be repaired after signing.
       - name: Verify generated Info.plist
         run: |
           set -euo pipefail
@@ -86,10 +174,13 @@ jobs:
           /usr/libexec/PlistBuddy -c "Print :UIFileSharingEnabled" Support/Info.plist
           /usr/libexec/PlistBuddy -c "Print :ITSAppUsesNonExemptEncryption" Support/Info.plist
           /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" Support/Info.plist
-          # Build 9 (T5, no USB): the LAN ATS exception must be present in the
-          # SIGNED plist — without it iOS blocks the http:// payload download
-          # and the ladder telemetry, and a signed bundle cannot be repaired.
+          /usr/libexec/PlistBuddy -c "Print :CFBundleVersion" Support/Info.plist
+          # v0.5/v0.6: both plain-HTTP LAN hosts must survive into the SIGNED
+          # plist — 192.168.68.83 (payload download, telemetry) and
+          # 192.168.68.92 (generation server). iOS blocks http:// otherwise.
           /usr/libexec/PlistBuddy -c "Print :NSAppTransportSecurity:NSExceptionDomains:192.168.68.83:NSExceptionAllowsInsecureHTTPLoads" Support/Info.plist
+          /usr/libexec/PlistBuddy -c "Print :NSAppTransportSecurity:NSExceptionDomains:192.168.68.92:NSExceptionAllowsInsecureHTTPLoads" Support/Info.plist
+          /usr/libexec/PlistBuddy -c "Print :NSLocalNetworkUsageDescription" Support/Info.plist
           # The memory ceiling the whole measurement depends on: the project
           # must point at an entitlements file, and the file must carry the
           # increased-memory-limit key.
@@ -100,6 +191,19 @@ jobs:
       - name: Archive (signed, App Store distribution)
         run: |
           set -o pipefail
+          SIGN_ARGS=(CODE_SIGN_STYLE=Automatic)
+          if [ -n "${PROFILE_SPECIFIER:-}" ]; then
+            # Fully manual: the imported distribution identity plus the
+            # installed profile. Nothing is created on the portal.
+            SIGN_ARGS=(CODE_SIGN_STYLE=Manual
+                       CODE_SIGN_IDENTITY="Apple Distribution"
+                       PROVISIONING_PROFILE_SPECIFIER="${PROFILE_SPECIFIER}")
+          fi
+          if [ -n "${SIGNING_KEYCHAIN:-}" ]; then
+            # One argument, not two: xcodebuild build settings are KEY=VALUE.
+            SIGN_ARGS+=(OTHER_CODE_SIGN_FLAGS="--keychain ${SIGNING_KEYCHAIN}")
+          fi
+          echo "signing: ${SIGN_ARGS[*]}"
           xcodebuild archive \
             -project CraftRoomAI.xcodeproj \
             -scheme CraftRoomAI \
@@ -111,7 +215,7 @@ jobs:
             -authenticationKeyID "$ASC_KEY_ID" \
             -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
             DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
-            CODE_SIGN_STYLE=Automatic \
+            "${SIGN_ARGS[@]}" \
             CURRENT_PROJECT_VERSION="$BUILD_NUMBER" | tail -120
 
       - name: Export options
@@ -123,9 +227,15 @@ jobs:
           # destination=upload sends the .ipa straight to App Store Connect in
           # the same step — no altool, no Transporter, no prompts.
           plutil -insert destination -string upload "$P"
-          plutil -insert signingStyle -string automatic "$P"
           plutil -insert teamID -string "$APPLE_TEAM_ID" "$P"
           plutil -insert manageAppVersionAndBuildNumber -bool false "$P"
+          if [ -n "${PROFILE_SPECIFIER:-}" ]; then
+            plutil -insert signingStyle -string manual "$P"
+            plutil -insert provisioningProfiles -json \
+              "{\"${BUNDLE_ID}\": \"${PROFILE_SPECIFIER}\"}" "$P"
+          else
+            plutil -insert signingStyle -string automatic "$P"
+          fi
           cat "$P"
 
       - name: Export + upload to TestFlight
@@ -144,10 +254,18 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
-          echo "bundle id : com.sheigl.CraftRoomAI"
+          echo "bundle id : $BUNDLE_ID"
           echo "version   : $(/usr/libexec/PlistBuddy -c 'Print :ApplicationProperties:CFBundleShortVersionString' "$RUNNER_TEMP/CraftRoomAI.xcarchive/Info.plist" 2>/dev/null || echo '?')"
           echo "build     : $BUILD_NUMBER"
+          echo "signing   : $([ -n "${PROFILE_SPECIFIER:-}" ] && echo manual || echo automatic)"
           echo "header on the iPad should read: v<version> ($BUILD_NUMBER)"
           ls -lh "$RUNNER_TEMP/export" 2>/dev/null || true
-          echo "App Store Connect → TestFlight: the ipa is ~50 MB now, processing should take minutes."
-          echo "The iPad downloads ~4 GB of models on first launch (public HF payload repo)."
+
+      - name: Remove the temporary keychain
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -n "${SIGNING_KEYCHAIN:-}" ]; then
+            security delete-keychain "$SIGNING_KEYCHAIN" || true
+          fi
+          rm -f "$RUNNER_TEMP/dist.p12" "$RUNNER_TEMP/dist.mobileprovision" "$RUNNER_TEMP/dist.plist" || true

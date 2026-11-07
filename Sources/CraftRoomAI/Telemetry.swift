@@ -18,6 +18,19 @@ import Foundation
 enum Telemetry {
     static let endpoint = "http://192.168.68.83:8123/log"
 
+    private static let enabledKey = "telemetry.enabled"
+
+    /// Settings → Developer switch. Default ON (the T5 ladder's whole point is
+    /// the remote tail); when OFF the app sends nothing and the file log stays
+    /// the only record.
+    static var enabled: Bool {
+        get {
+            if UserDefaults.standard.object(forKey: enabledKey) == nil { return true }
+            return UserDefaults.standard.bool(forKey: enabledKey)
+        }
+        set { UserDefaults.standard.set(newValue, forKey: enabledKey) }
+    }
+
     private static let session: URLSession = {
         let cfg = URLSessionConfiguration.ephemeral
         cfg.timeoutIntervalForRequest = 5
@@ -39,6 +52,7 @@ enum Telemetry {
 
     /// Queue one line for delivery; return immediately. Never throws.
     static func send(_ line: String) {
+        guard enabled else { return }
         guard let url = URL(string: endpoint),
               let body = line.data(using: .utf8) else { return }
         queue.async {

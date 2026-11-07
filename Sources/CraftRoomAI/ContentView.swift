@@ -2,811 +2,316 @@ import SwiftUI
 import UIKit
 import CraftRoomCore
 
+/// The product screen (plan T4.8–T4.9): pick a photo, watch honest stages, see
+/// the page, share it. The engine and everything diagnostic live behind
+/// Settings so the first launch with no payload is a usable app, not a
+/// download gate.
 struct ContentView: View {
-    @State private var photo: UIImage?
-    @State private var result: UIImage?
-    @State private var status = "Pick a photo to begin."
-    @State private var stats = ""
-    @State private var running = false
-    @State private var units: ComputeUnitsOption = .all
-    @State private var variant: AttentionVariant = .sdpa
-    @State private var steps: Int = Spatial.defaultSteps
-    @State private var showPicker = false
-    @State private var seedText = "42"
-    /// Default ON: a kill still leaves the budget-vs-weights line in the log,
-    /// which IS the measurement, so we attempt and log rather than refuse.
-    @State private var forceLoad = true
-    @State private var logText = ""
-    @State private var payload: PayloadState = .checking
-    @State private var verdict = ""
-    @State private var stage = "start"
-    @State private var savedName = ""
+    @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var ladder: LadderController
 
-    private let engine = Engine()
+    @State private var showPicker = false
+    @State private var showSettings = false
+    @State private var showGallery = false
+    @State private var showResult = false
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                Text("Craft Room AI — device v2")
-                    .font(.largeTitle.bold())
-                Text("\(Diagnostics.build) · \(Diagnostics.summary())")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-                if !verdict.isEmpty {
-                    Text(verdict)
-                        .font(.caption.bold())
-                        .foregroundStyle(verdict.contains("IMPOSSIBLE") ? Color.red : Color.secondary)
-                        .textSelection(.enabled)
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    engineChip
+                    photoSection
+                    actionSection
+                    if model.isRunning { progressCard }
+                    if let message = model.errorMessage { errorCard(message) }
+                    Text(model.status)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    footer
                 }
-
-                if payload == .ready {
-                    controls
-                } else {
-                    payloadCard
-                }
-                Text(status)
-                    .font(.title3)
-                    .foregroundStyle(status.contains("failed") ? Color.red : Color.primary)
-                if let result {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Result")
-                            .font(.headline)
-                        Image(uiImage: result)
-                            .resizable()
-                            .scaledToFit()
-                            .frame(maxWidth: .infinity, minHeight: 320)
-                        HStack {
-                            Button("Save PNG") { save(result) }
-                                .buttonStyle(.bordered)
-                            if !savedName.isEmpty {
-                                Text(savedName)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
+                .padding(20)
+                .frame(maxWidth: 720, alignment: .leading)
+                .frame(maxWidth: .infinity)
+            }
+            .background(Color(.systemGroupedBackground).ignoresSafeArea())
+            .navigationTitle("Craft Room AI")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        showGallery = true
+                    } label: {
+                        Label("Gallery", systemImage: "square.grid.2x2")
                     }
                 }
-                if !stats.isEmpty {
-                    Text(stats)
-                        .font(.system(.body, design: .monospaced))
-                        .textSelection(.enabled)
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        showSettings = true
+                    } label: {
+                        Label("Settings", systemImage: "gearshape")
+                    }
                 }
-                logPanel
             }
-            .padding()
-        }
-        .sheet(isPresented: $showPicker) {
-            ImagePicker { picked in
-                photo = picked
-                result = nil
-                stats = ""
-                status = "Photo ready. Tap Generate."
+            .sheet(isPresented: $showPicker) {
+                ImagePicker { picked in
+                    model.setPhoto(picked)
+                }
+            }
+            .sheet(isPresented: $showSettings) {
+                SettingsView()
+            }
+            .sheet(isPresented: $showGallery) {
+                GalleryView()
+            }
+            .sheet(isPresented: $showResult) {
+                if let output = model.output {
+                    ResultView(output: output)
+                }
+            }
+            .onChange(of: model.output?.id) { _, newValue in
+                if newValue != nil { showResult = true }
             }
         }
-        .task {
-            verdict = Diagnostics.memoryVerdict()
-            logText = Diagnostics.tail()
-            payload = PayloadStore.shared.state
-            variant = AttentionVariant(rawValue: PayloadStore.shared.variant) ?? .sdpa
-            if case .missing = payload, autoLadder() != nil {
-                // Unattended run (bundled or pushed ladder): start the payload
-                // download with no tap. Build 9's whole point is that opening
-                // the app is the only gesture the T5 checklist needs.
-                Diagnostics.log("auto: payload missing, starting download unattended")
-                Telemetry.send("auto: payload missing, starting download unattended "
-                               + "(base \(PayloadStore.shared.baseURL))")
-                startDownload()
-            }
-            maybeStartAuto()
-        }
+        .tint(Theme.accent)
         .overlay {
-            if autoDim {
+            // A ladder run holds the screen awake; the black overlay is what
+            // build 9 shipped so the iPad is not left showing the app while it
+            // measures for an hour.
+            if ladder.dimmed {
                 ZStack {
                     Color.black.ignoresSafeArea()
                     VStack(spacing: 8) {
-                        Text("auto ladder running")
-                            .font(.caption2)
+                        Text("Measuring the on-device pipeline")
+                            .font(.caption)
                             .foregroundStyle(.gray)
-                        Text(status)
+                        Text(ladder.status)
                             .font(.caption2)
                             .foregroundStyle(.gray.opacity(0.6))
                     }
                 }
             }
         }
-    }
-
-    private var logPanel: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Log")
-                    .font(.headline)
-                Spacer()
-                Button("Reload") { logText = Diagnostics.tail() }
-                    .buttonStyle(.bordered)
-                Button("Copy") { UIPasteboard.general.string = logText }
-                    .buttonStyle(.bordered)
-            }
-            Text(logText)
-                .font(.system(.caption, design: .monospaced))
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
+        .task {
+            model.onAppear()
+            // No implicit ladder: this runs a cell only for a --auto launch
+            // argument, or when the owner already tapped "Run ladder".
+            ladder.runIfRequested()
         }
     }
 
-    // MARK: payload
+    // MARK: engine
 
-    private var payloadCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Picker("Attention", selection: $variant) {
-                    ForEach(AttentionVariant.allCases) { v in
-                        Text(v.label).tag(v)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .disabled(running)
-            }
-            Text("base: \(PayloadStore.shared.baseURL)")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
-            if let override = PayloadStore.shared.overrideSource {
-                Text("override: \(override)")
-                    .font(.caption2)
+    private var engineChip: some View {
+        HStack(spacing: 12) {
+            Image(systemName: model.settings.engine == .localServer
+                  ? "wifi" : "ipad")
+                .font(.title3)
+                .foregroundStyle(Theme.accent)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(model.settings.engine.label)
+                    .font(.subheadline.weight(.semibold))
+                Text(engineSubtitle)
+                    .font(.caption)
                     .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
+                    .lineLimit(1)
             }
-            switch payload {
-            case .checking:
-                Text("Checking installed models…").foregroundStyle(.secondary)
-            case .missing(let totalMB):
-                Text("Models not installed").font(.headline)
-                Text(String(format: "This build downloads %.2f GB of the device-v2 payload (%@). Run it on Wi-Fi; the screen is held awake automatically. An interrupted file resumes where it stopped (the `.part` bytes are reused when the server supports Range).",
-                            Double(totalMB) / 1024, variant.label))
-                    .foregroundStyle(.secondary)
-                Button("Download models") { startDownload() }
-                    .buttonStyle(.borderedProminent)
-            case .downloading(let fraction, let doneMB, let totalMB):
-                Text("Downloading models…").font(.headline)
-                ProgressView(value: fraction)
-                Text("\(doneMB) / \(totalMB) MB")
-                    .font(.system(.body, design: .monospaced))
-                Button("Cancel", role: .destructive) { PayloadStore.shared.cancel() }
-            case .failed(let msg):
-                Text("Download failed").font(.headline)
-                Text(msg)
-                    .foregroundStyle(.red)
-                    .textSelection(.enabled)
-                Button("Retry download") { startDownload() }
-                    .buttonStyle(.borderedProminent)
-            case .ready:
-                EmptyView()
-            }
+            Spacer()
+            Button("Change") { showSettings = true }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
         }
         .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.yellow.opacity(0.12), in: .rect(cornerRadius: 12))
+        .background(Color(.secondarySystemGroupedBackground),
+                    in: RoundedRectangle(cornerRadius: 12))
     }
 
-    private func startDownload() {
-        PayloadStore.shared.variant = variant.rawValue
-        let totalMB = (PayloadStore.shared.manifestV2
-            .flatMap { try? $0.bytes(forVariant: variant.rawValue) } ?? 0) / 1_048_576
-        payload = .downloading(fraction: 0, doneMB: 0, totalMB: totalMB)
-        status = "Downloading models…"
-        Telemetry.send("payload: download start, base \(PayloadStore.shared.baseURL) "
-                       + "variant \(variant.rawValue) (~\(totalMB / 1024) GB)")
-        Task {
-            let dl = Task { try await PayloadStore.shared.downloadAll() }
-            let poll = Task {
-                while !Task.isCancelled {
-                    try? await Task.sleep(for: .milliseconds(500))
-                    let s = PayloadStore.shared.snapshot()
-                    await MainActor.run {
-                        payload = .downloading(
-                            fraction: Double(s.done) / Double(max(s.total, 1)),
-                            doneMB: s.done / 1_048_576,
-                            totalMB: s.total / 1_048_576)
-                    }
-                }
-            }
-            do {
-                try await dl.value
-                poll.cancel()
-                payload = .ready
-                verdict = Diagnostics.memoryVerdict()
-                maybeStartAuto()
-                status = "Models installed. Pick a photo to begin."
-                logText = Diagnostics.tail()
-                Telemetry.send("payload: installed \(variant.rawValue), "
-                               + "starting ladder check")
-            } catch {
-                poll.cancel()
-                let msg = error.localizedDescription
-                Diagnostics.log("payload download failed: \(msg)")
-                Telemetry.send("payload download failed: \(msg) "
-                               + "(base \(PayloadStore.shared.baseURL))")
-                payload = .failed(msg)
-                status = "Download failed."
-            }
+    private var engineSubtitle: String {
+        switch model.settings.engine {
+        case .localServer:
+            return model.settings.baseURL.absoluteString
+        case .onDevice:
+            return payloadSubtitle
         }
     }
 
-    // MARK: controls
+    private var payloadSubtitle: String {
+        switch model.payloadState {
+        case .ready:
+            return "Models installed on this iPad"
+        case .missing(let totalMB):
+            return "Models not downloaded (\(totalMB / 1024) GB)"
+        case .downloading(let fraction, _, _):
+            return String(format: "Downloading models %.0f %%", fraction * 100)
+        case .failed:
+            return "Model download failed"
+        case .checking:
+            return "Checking models…"
+        }
+    }
 
-    private var controls: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Button("Choose photo") { showPicker = true }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(running)
-                if let photo {
-                    Image(uiImage: photo)
-                        .resizable()
-                        .frame(width: 96, height: 64)
-                        .clipShape(.rect)
+    // MARK: photo
+
+    private var photoSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if let photo = model.photo {
+                Image(uiImage: photo)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxHeight: 300)
+                    .frame(maxWidth: .infinity)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                HStack {
+                    Button("Choose another photo") { showPicker = true }
+                        .buttonStyle(.bordered)
+                        .disabled(model.isRunning)
+                    Button("Remove", role: .destructive) { model.clearPhoto() }
+                        .buttonStyle(.borderless)
+                        .disabled(model.isRunning)
                 }
-            }
-            Picker("Units", selection: $units) {
-                ForEach(ComputeUnitsOption.allCases) { opt in
-                    Text(opt.label).tag(opt)
-                }
-            }
-            .pickerStyle(.segmented)
-            .disabled(running)
-            Picker("Attention", selection: $variant) {
-                ForEach(AttentionVariant.allCases) { v in
-                    Text(v.label).tag(v)
-                }
-            }
-            .pickerStyle(.segmented)
-            .disabled(running)
-            .onChange(of: variant) { _, new in
-                PayloadStore.shared.variant = new.rawValue
-                payload = PayloadStore.shared.state
-            }
-            Picker("Steps", selection: $steps) {
-                ForEach([1, 5, 30], id: \.self) { n in
-                    Text("\(n)").tag(n)
-                }
-            }
-            .pickerStyle(.segmented)
-            .disabled(running)
-            Toggle("Load even if the preflight says impossible", isOn: $forceLoad)
-                .disabled(running)
-            HStack {
-                Text("Seed")
-                TextField("seed", text: $seedText)
-                    .frame(width: 90)
-                    .disabled(running)
-            }
-            if running {
-                ProgressView()
             } else {
                 Button {
-                    run()
+                    showPicker = true
                 } label: {
-                    Text("Generate").font(.headline)
+                    VStack(spacing: 10) {
+                        Image(systemName: "photo.on.rectangle.angled")
+                            .font(.system(size: 36))
+                            .foregroundStyle(Theme.accent)
+                        Text("Choose a photo")
+                            .font(.headline)
+                        Text("It becomes a black-and-white colouring page.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 190)
+                    .background(Color(.secondarySystemGroupedBackground),
+                                in: RoundedRectangle(cornerRadius: 16))
+                }
+                .buttonStyle(.plain)
+                .disabled(model.isRunning)
+            }
+        }
+    }
+
+    // MARK: actions
+
+    private var actionSection: some View {
+        VStack(spacing: 10) {
+            if model.isRunning {
+                Button(role: .cancel) {
+                    model.cancel()
+                } label: {
+                    Text("Cancel").frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+            } else {
+                Button {
+                    model.generate()
+                } label: {
+                    Text(model.output == nil ? "Generate page" : "Generate again")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(photo == nil)
-            }
-        }
-    }
+                .controlSize(.large)
+                .disabled(model.photo == nil)
 
-    // MARK: auto mode (unattended ladder)
-
-    // Two ways in, both needing no taps beyond launching the app:
-    //  1. launch args: --auto --units=all|cpuOnly|ane|gpu --model=sdpa|split_einsum|fp16
-    //                  --steps=30 --seed=42          (unknown spellings default forgiving)
-    //  2. Documents/auto.json:
-    //       {"cells":[{"units":"all","model":"sdpa","steps":1,"seed":42}, …]}
-    //      (build 11: a units/model typo fails the whole file — mislabelled
-    //       cells would poison the results table; see LadderUnits.strict)
-    //  3. (build 9, no USB) bundled auto_default.json — units × attention ×
-    //     steps full matrix, runs once; Documents/auto_default.done marks it.
-    // Cells run back to back; each ends with one AUTO-RESULT line in
-    // Documents/ladder.log (never truncated), then auto.json becomes
-    // auto.done.json (or the done marker is written) so a relaunch does not
-    // repeat the ladder. Timing is
-    // content-independent (fixed graph), so the bundled test photo is enough.
-    // The screen is held awake by the app itself and painted black.
-    // Every ladder.log line is also POSTed to the LAN collector (Telemetry).
-
-    struct AutoCell {
-        var units: ComputeUnitsOption
-        var variant: AttentionVariant
-        var steps: Int
-        var seed: UInt64
-        /// Overrides the estimated-skip preflight (auto.json `"force": true`).
-        var force: Bool = false
-
-        var label: String { "\(units.rawValue)/\(variant.rawValue)/\(steps)" }
-    }
-
-    @State private var autoStarted = false
-    @State private var autoWaitLogged = false
-    @State private var autoParseFailLogged = false
-    @State private var autoDim = false
-    /// The crash cursor of this launch's ladder (see `LadderStore`): written to
-    /// `Documents/ladder_cursor.json` before every cell so a jetsam kill after
-    /// this line is attributable to a named cell.
-    @State private var ladderCursor: LadderCursor?
-
-    private static func units(from s: String?) -> ComputeUnitsOption? {
-        switch LadderUnits.strict(s) {
-        case .cpuOnly: return .cpuOnly
-        case .cpuAndNeuralEngine: return .cpuAndNeuralEngine
-        case .cpuAndGPU: return .cpuAndGPU
-        case .all: return .all
-        case nil: return nil   // an unknown unit would mislabel the matrix — fail the file
-        }
-    }
-
-    private static func variant(from s: String?) -> AttentionVariant? {
-        AttentionVariant(rawValue: s ?? "")
-    }
-
-    enum AutoSource { case launchArgs, documents, bundled }
-
-    private static func autoJSONURL() -> URL? {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)
-            .first?.appendingPathComponent("auto.json")
-    }
-
-    /// Written after a BUNDLED ladder finishes so a relaunch never repeats the
-    /// hours-long matrix (the pushed-file equivalent is the rename to
-    /// auto.done.json). Build 10: it is written when the *cursor* is exhausted
-    /// (every cell done, failed or skipped), not merely when a loop pass ends —
-    /// a cell that kills the process must not restart the matrix forever.
-    private static func autoDefaultDoneURL() -> URL? { LadderStore.defaultDoneURL }
-
-    /// `{"cells":[{units, model, steps, seed, force}, …]}` — same protocol for
-    /// the pushed auto.json and the bundled auto_default.json. `force:true`
-    /// overrides the build-10 estimated-skip preflight for that cell.
-    private static func parseCells(_ data: Data) -> [AutoCell]? {
-        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let raw = root["cells"] as? [[String: Any]], !raw.isEmpty else { return nil }
-        var cells: [AutoCell] = []
-        for c in raw {
-            // A typo in units/model must fail the whole file loudly (parse-failed
-            // is logged) rather than silently run as all/sdpa mislabelled cells.
-            guard let units = Self.units(from: c["units"] as? String),
-                  let variant = Self.variant(from: c["model"] as? String) else { return nil }
-            cells.append(AutoCell(units: units, variant: variant,
-                                  steps: max(1, min(30, (c["steps"] as? NSNumber)?.intValue
-                                                    ?? (c["maxSteps"] as? NSNumber)?.intValue ?? 30)),
-                                  seed: (c["seed"] as? NSNumber)?.uint64Value ?? 42,
-                                  force: (c["force"] as? NSNumber)?.boolValue ?? false))
-        }
-        return cells
-    }
-
-    /// Ladder cells and their source. Priority: launch args →
-    /// Documents/auto.json (still wins) → bundled auto_default.json, which is
-    /// skipped once auto_default.done marks a finished run.
-    private func autoLadder() -> (cells: [AutoCell], source: AutoSource)? {
-        if let single = launchArgCell() { return ([single], .launchArgs) }
-        if let url = Self.autoJSONURL(), let data = try? Data(contentsOf: url) {
-            if let cells = Self.parseCells(data) { return (cells, .documents) }
-            // A pushed auto.json is an explicit instruction. Since build 11 a
-            // bad units/model token fails the WHOLE file — and then the file
-            // must fail loudly, never silently hand over to the bundled
-            // matrix the owner deliberately replaced.
-            if !autoParseFailLogged {
-                autoParseFailLogged = true
-                LadderLog.append("ERROR auto: auto.json parse failed — every cell needs a"
-                    + " known units (all|cpuAndNeuralEngine|cpuAndGPU|cpuOnly) and model"
-                    + " (sdpa|split_einsum|fp16); bundled ladder NOT started")
-            }
-            return nil
-        }
-        if let done = Self.autoDefaultDoneURL(),
-           FileManager.default.fileExists(atPath: done.path) { return nil }
-        if let url = Bundle.main.url(forResource: "auto_default", withExtension: "json"),
-           let data = try? Data(contentsOf: url),
-           let cells = Self.parseCells(data) { return (cells, .bundled) }
-        return nil
-    }
-
-    private func launchArgCell() -> AutoCell? {
-        let a = CommandLine.arguments
-        guard a.contains("--auto") else { return nil }
-        func val(_ key: String) -> String? {
-            guard let i = a.firstIndex(of: key), i + 1 < a.count else { return nil }
-            return a[i + 1]
-        }
-        // Manual (USB/pdm3) runs keep the forgiving defaults; only the
-        // unattended matrices go strict via parseCells.
-        return AutoCell(units: Self.units(from: val("--units")) ?? .all,
-                        variant: Self.variant(from: val("--model")) ?? .sdpa,
-                        steps: max(1, min(30, Int(val("--steps") ?? "30") ?? 30)),
-                        seed: UInt64(val("--seed") ?? "42") ?? 42,
-                        force: a.contains("--force"))
-    }
-
-    private func maybeStartAuto() {
-        guard !autoStarted, let auto = autoLadder() else { return }
-        let cells = auto.cells
-        guard case .ready = payload else {
-            if !autoWaitLogged {
-                autoWaitLogged = true
-                LadderLog.instrument("auto: waiting for payload install "
-                                     + "(base \(PayloadStore.shared.baseURL))")
-            }
-            return
-        }
-        autoStarted = true
-        guard let url = Bundle.main.url(forResource: "test_photo", withExtension: "jpg"),
-              let img = UIImage(contentsOfFile: url.path) else {
-            LadderLog.append("ERROR auto: bundled test_photo.jpg missing")
-            return
-        }
-
-        // ---- crash cursor: the anti-crash-loop (build 10) ------------------
-        // A launch-arg run is one deliberate cell (pdm3/USB) and stays
-        // cursor-free; the unattended matrices are the thing that looped.
-        var cursor: LadderCursor?
-        if auto.source != .launchArgs {
-            let labels = cells.map(\.label)
-            let id = LadderCursor.ladderID(for: labels)
-            var c = LadderStore.load(matching: id) ?? LadderCursor(ladderID: id, labels: labels)
-            let carried = c.cells.contains { $0.attempts > 0 || $0.state != .pending }
-            for r in c.recoverAfterRestart() {
-                LadderLog.append("AUTO-FAIL cell=\(r.label) reason=process-restart"
-                    + " (attempt \(r.attempts))"
-                    + (r.willRetry ? " → one retry left" : " → giving up, advancing"))
-            }
-            if carried {
-                LadderLog.append("auto: resuming existing cursor (\(c.summary()))")
-            }
-            if c.isComplete {
-                // Every cell settled: this launch must NOT run anything. The
-                // line below is the proof the crash loop is closed.
-                LadderLog.append("auto: cursor exhausted (\(c.summary())) — not restarting"
-                    + " the ladder [\(auto.source)] \(cells.count) cell(s)")
-                if auto.source == .bundled {
-                    LadderStore.markDefaultDone("cursor exhausted: \(c.summary())")
-                }
-                LadderStore.save(c)
-                Telemetry.send(Telemetry.deliverySummary)
-                status = "Ladder already finished — see ladder.log."
-                logText = Diagnostics.tail()
-                return
-            }
-            cursor = c
-            LadderStore.save(c)
-        }
-        ladderCursor = cursor
-
-        autoDim = true
-        let startLine = "auto: \(cells.count) cell(s) [\(auto.source)] — "
-            + cells.map(\.label).joined(separator: " · ")
-        run(preferredPhoto: img, ladder: cells, ladderSource: auto.source, cursor: cursor)
-        LadderLog.append(startLine)
-    }
-
-    // MARK: run
-
-    /// One pass over the ladder. Build 10 changed the loop from "run everything,
-    /// abort on the first error" to "run what the cursor still allows, and let a
-    /// dead cell be a data point":
-    ///
-    ///  * cells already settled by an earlier process are skipped (`RESUME-SKIP`);
-    ///  * MemoryPreflight v2 refuses the cells certain to jetsam (any UNet on
-    ///    `cpuOnly`; an fp16 load whose 8,750 MB estimate no longer fits the
-    ///    headroom) without attempting them (`AUTO-SKIP`);
-    ///  * a PLAN probe (build 11) answers per variant whether the ANE takes
-    ///    the graph, before that variant's first load;
-    ///  * every attempt is announced with `START cell=… attempt=N` *before* the
-    ///    load, and the cursor is on disk first, so a kill is attributable;
-    ///  * an error marks the cell failed and the pass continues (3 in a row
-    ///    stops the pass — a doomed matrix should not burn 12 loads);
-    ///  * the run-once marker is written only when the cursor is exhausted.
-    private func run(preferredPhoto: UIImage? = nil, ladder: [AutoCell]? = nil,
-                     ladderSource: AutoSource = .documents,
-                     cursor initialCursor: LadderCursor? = nil) {
-        guard let photo = preferredPhoto ?? photo else { return }
-        let cells = ladder ?? [AutoCell(
-            units: units,
-            variant: variant,
-            steps: steps,
-            seed: UInt64(seedText.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 42)]
-        let auto = ladder != nil
-        let force = forceLoad
-        var cursor = initialCursor
-        running = true
-        Task.detached(priority: .userInitiated) {
-            await MainActor.run { UIApplication.shared.isIdleTimerDisabled = true }
-            if ladder != nil {
-                // The plan, in durable order: a reader can see the intended
-                // matrix even when the first cell kills the process.
-                for cell0 in cells { LadderLog.append("CELL \(cell0.label)") }
-                // Hypothesis gate before any 2.9 GB load: does a small
-                // macOS-compiled .mlmodelc load and run on this iPadOS at all?
-                LadderLog.instrument("selftest: VAEDecoder_sdxl_fp32 before cell 1")
-                SelfTest.runVAEOnce()
-            }
-            var didReset = false
-            var consecutiveFailures = 0
-            var stoppedEarly = false
-            for (idx, cell) in cells.enumerated() {
-                var lastStage = "start"
-                // ---- settled by an earlier process: do not re-run ----------
-                if let st = cursor?.state(idx), st != .pending {
-                    LadderLog.append("RESUME-SKIP cell=\(cell.label) reason=already-\(st.rawValue)")
-                    continue
-                }
-                // ---- this cell's variant payload installed? (build 11) ------
-                // The store's ready state covers the SELECTED variant only; the
-                // ladder spans three. An uninstalled 7.6 GB fp16 group must be
-                // a readable AUTO-SKIP, not three mystery "not installed"
-                // failures that stop the pass.
-                if !PayloadStore.shared.isReady(variant: cell.variant.rawValue) {
-                    cursor?.skip(idx)
-                    Self.persist(cursor)
-                    LadderLog.append("AUTO-SKIP cell=\(cell.label) reason=payload-missing"
-                        + " · \(cell.variant.modelName) not downloaded — pick the"
-                        + " \(cell.variant.rawValue) variant in the payload UI first")
-                    continue
-                }
-                // ---- MemoryPreflight v2: refuse what is certain to jetsam ---
-                let headroom = Diagnostics.availableMemoryMB()
-                if let est = MemoryPreflight.estimate(units: cell.units.rawValue,
-                                                      modelName: cell.variant.modelName),
-                   case .skip(let reason) = MemoryPreflight.decideCell(
-                       units: cell.units.rawValue, modelName: cell.variant.modelName,
-                       headroomMB: headroom, force: cell.force || force) {
-                    cursor?.skip(idx)
-                    Self.persist(cursor)
-                    LadderLog.append(String(format:
-                        "AUTO-SKIP cell=%@ reason=%@ · %@ · footprint %.0f MB",
-                        cell.label, reason,
-                        MemoryPreflight.detail(headroomMB: headroom, estimateMB: est.miB),
-                        Diagnostics.footprintMB()))
-                    continue
-                }
-                // ---- cursor first, then the START line, then the work ------
-                let attempt = cursor?.begin(idx) ?? 1
-                Self.persist(cursor)
-                let free = Diagnostics.availableMemoryMB().map { String(format: "%.0f", $0) }
-                    ?? "n/a"
-                LadderLog.append(String(format:
-                    "START cell=%@ attempt=%d index=%d/%d · footprint %.0f MB · headroom %@ MB",
-                    cell.label, attempt, idx + 1, cells.count,
-                    Diagnostics.footprintMB(), free))
-                // ---- PLAN probe (build 11): which device actually runs this
-                // graph? Metadata only — no weight byte is materialised — but
-                // plan compile can take minutes on a graph this size, so the
-                // cursor line and START are already on disk and the watchdog
-                // covers it. Once per variant; a failed probe is a data line.
-                PlanProbe.probeIfNeeded(variant: cell.variant, units: cell.units)
-                if !didReset {
-                    Diagnostics.reset("run on \(cell.label) seed \(cell.seed)"
-                        + " photo \(Int(photo.size.width))x\(Int(photo.size.height))")
-                    didReset = true
-                } else {
-                    Diagnostics.log("=== cell \(idx + 1)/\(cells.count): \(cell.label)"
-                        + " attempt \(attempt)")
-                }
-                await MainActor.run {
-                    stats = ""
-                    status = "Starting \(cell.label)…"
-                    stage = "start"
-                }
-                do {
-                    let stageSink: (String) -> Void = { msg in
-                        lastStage = msg
-                        Diagnostics.log("stage: " + msg)
-                        Task { await MainActor.run {
-                            status = msg
-                            stage = msg
-                        } }
+                if let output = model.output, output.item != nil {
+                    Button {
+                        showResult = true
+                    } label: {
+                        Label("Show page", systemImage: "photo")
+                            .frame(maxWidth: .infinity)
                     }
-                    let (img, s) = try await engine.run(units: cell.units,
-                                                        variant: cell.variant,
-                                                        photo: photo,
-                                                        seed: cell.seed,
-                                                        forceLoad: force,
-                                                        onStage: stageSink,
-                                                        steps: cell.steps)
-                    var saved: String?
-                    if auto || ladder != nil {
-                        saved = Self.saveRender(img, cell: cell, seed: cell.seed)
-                    }
-                    cursor?.settle(idx, .done)
-                    Self.persist(cursor)
-                    consecutiveFailures = 0
-                    let line = auto ? Self.autoResult(s, cell) : ""
-                    await MainActor.run {
-                        result = img
-                        status = "Done."
-                        stats = Self.format(s)
-                        if let saved { savedName = saved }
-                        if !line.isEmpty {
-                            LadderLog.append(line)
-                            if let saved { LadderLog.instrument("render saved \(saved)") }
-                        }
-                        logText = Diagnostics.tail()
-                    }
-                } catch {
-                    let msg = error.localizedDescription
-                    let failedAt = lastStage
-                    // The 15-min load timeout throws (the abandoned load keeps
-                    // growing under the watchdog); name it in the machine line
-                    // so the decision tree can read reason=load-timeout.
-                    let reason = msg.localizedCaseInsensitiveContains("load-timeout")
-                        ? "load-timeout" : "error"
-                    cursor?.settle(idx, .failed)
-                    Self.persist(cursor)
-                    consecutiveFailures += 1
-                    Diagnostics.log("ERROR at \(failedAt): \(msg)")
-                    LadderLog.append("FAILED cell=\(cell.label) attempt=\(attempt)"
-                        + " reason=\(reason) at \(failedAt): \(msg)")
-                    await MainActor.run {
-                        status = "\(failedAt) failed: \(msg)"
-                        logText = Diagnostics.tail()
-                    }
-                    if consecutiveFailures >= Self.consecutiveFailureStop {
-                        LadderLog.append("auto: \(consecutiveFailures) consecutive failures"
-                            + " — stopping this pass (the cursor keeps the rest for"
-                            + " a relaunch)")
-                        stoppedEarly = true
-                        break
-                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
                 }
             }
-            if ladder != nil {
-                let settled = cursor.map { $0.summary() } ?? "no cursor"
-                let complete = cursor?.isComplete ?? true
-                let done = "auto: pass complete (\(cells.count) cell(s)) · \(settled)"
-                    + (stoppedEarly ? " · stopped early" : "")
-                LadderLog.append(done)
-                if complete {
-                    switch ladderSource {
-                    case .launchArgs:
-                        break
-                    case .documents:
-                        if let url = Self.autoJSONURL() {
-                            let doneURL = url.deletingLastPathComponent()
-                                .appendingPathComponent("auto.done.json")
-                            try? FileManager.default.removeItem(at: doneURL)
-                            try? FileManager.default.moveItem(at: url, to: doneURL)
-                        }
-                    case .bundled:
-                        // run-once marker, written only once the cursor has no
-                        // cell left to try (build 9 wrote it after the first
-                        // pass, which hid an unfinished matrix)
-                        LadderStore.markDefaultDone("cursor: \(settled)")
-                    }
-                    LadderLog.append("auto: cursor exhausted (\(settled)) — relaunch will not loop")
-                } else {
-                    LadderLog.append("auto: cursor not exhausted (\(settled))"
-                        + " — a relaunch resumes it")
+        }
+    }
+
+    // MARK: progress
+
+    private var progressCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text(model.stage?.label(progress: model.stageFraction) ?? "Working…")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                elapsed
+            }
+            ProgressView(value: min(max(model.overallProgress, 0), 1))
+                .tint(Theme.accent)
+            if model.settings.engine == .localServer {
+                Text("Rendering on desktop2. The first page after a server restart "
+                     + "can take a minute while the model loads.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(14)
+        .background(Color(.secondarySystemGroupedBackground),
+                    in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var elapsed: some View {
+        TimelineView(.periodic(from: .now, by: 0.5)) { context in
+            Text(elapsedText(now: context.date))
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func elapsedText(now: Date) -> String {
+        guard let startedAt = model.startedAt else { return "" }
+        let seconds = max(0, now.timeIntervalSince(startedAt))
+        return String(format: "%.0f s", seconds)
+    }
+
+    // MARK: error
+
+    private func errorCard(_ message: String) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("Something went wrong", systemImage: "exclamationmark.triangle")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.red)
+            Text(message)
+                .font(.callout)
+                .textSelection(.enabled)
+            HStack {
+                if model.photo != nil {
+                    Button("Retry") { model.retry() }
+                        .buttonStyle(.borderedProminent)
                 }
-                Telemetry.flush()
-                LadderLog.append(Telemetry.deliverySummary)
+                Button(model.alternateEngine == .localServer
+                       ? "Use Local server" : "Use On-device") {
+                    model.switchEngineAndRetry()
+                }
+                .buttonStyle(.bordered)
+                Button("Settings") { showSettings = true }
+                    .buttonStyle(.bordered)
             }
-            await MainActor.run {
-                running = false
-                autoDim = false
-                logText = Diagnostics.tail()
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.red.opacity(0.08),
+                    in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    // MARK: footer
+
+    private var footer: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(model.versionLine)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            if let health = model.health, !health.ok, let detail = health.detail {
+                Text(detail)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
             }
-            await MainActor.run { UIApplication.shared.isIdleTimerDisabled = false }
         }
-    }
-
-    /// The cursor on disk is always one step ahead of the work.
-    private static func persist(_ cursor: LadderCursor?) {
-        if let cursor { LadderStore.save(cursor) }
-    }
-
-    /// How many failures in a row end a pass. A cell that merely *throws* (as
-    /// opposed to killing the process) used to abort the whole matrix, which
-    /// hid every later ANE cell behind one cpuOnly failure.
-    private static let consecutiveFailureStop = 3
-
-    /// One machine-readable line per ladder cell. Keeps the v0.4 field names
-    /// (`units=`, `median_forward_ms=`, `peak_mem_mb=`) and adds `model=` and
-    /// `steps=`; batch 2 means one forward per step, so step == forward time.
-    private static func autoResult(_ s: RunStats, _ cell: AutoCell) -> String {
-        let sorted = s.stepMillis.sorted()
-        let med = sorted.isEmpty ? 0 : sorted[max(0, sorted.count / 2 - 1)]
-        return "AUTO-RESULT units=\(s.units) model=\(cell.variant.rawValue)"
-            + " steps=\(s.stepMillis.count)"
-            + " median_step_ms=" + String(format: "%.0f", med)
-            + " median_forward_ms=" + String(format: "%.0f", med)
-            + " peak_mem_mb=" + String(format: "%.0f", s.peakMemMB)
-            + " total_s=" + String(format: "%.1f", s.total)
-            + " canvas=" + s.canvas
-    }
-
-    /// Renders land in Documents/renders/ so the T6 grading round can pull them
-    /// over AFC/Finder without another share sheet.
-    private static func saveRender(_ image: UIImage, cell: AutoCell, seed: UInt64) -> String? {
-        guard let docs = FileManager.default.urls(for: .documentDirectory,
-                                                  in: .userDomainMask).first,
-              let data = image.pngData() else { return nil }
-        let dir = docs.appendingPathComponent("renders", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let f = DateFormatter()
-        f.dateFormat = "HHmmss"
-        let name = "\(cell.units.rawValue)_\(cell.variant.rawValue)_s\(cell.steps)"
-            + "_seed\(seed)_\(f.string(from: Date())).png"
-        do {
-            try data.write(to: dir.appendingPathComponent(name), options: .atomic)
-            return "renders/\(name)"
-        } catch {
-            Diagnostics.log("ERROR saving render: \(error.localizedDescription)")
-            return nil
-        }
-    }
-
-    private func save(_ image: UIImage) {
-        let cell = AutoCell(units: units, variant: variant, steps: steps, seed: 0)
-        savedName = Self.saveRender(image, cell: cell, seed: 0) ?? ""
-    }
-
-    static func format(_ s: RunStats) -> String {
-        let ms = s.stepMillis
-        let avg = ms.isEmpty ? 0.0 : ms.reduce(0, +) / Double(ms.count)
-        let fastest = ms.min() ?? 0
-        let slowest = ms.max() ?? 0
-        return """
-        units:          \(s.units)
-        model:          \(s.variant)
-        steps:          \(s.steps) (\(s.forwards) forwards, batch 2)
-        canvas:         \(s.canvas)
-        model load:     \(sec(s.modelLoad))
-        prep+canny:     \(sec(s.encode))
-        loop:           \(sec(s.loop))
-          per step avg: \(String(format: "%.0f", avg)) ms \
-        (min \(String(format: "%.0f", fastest)) / max \(String(format: "%.0f", slowest)))
-        vae decode:     \(sec(s.decode))
-        TOTAL:          \(String(format: "%.1f", s.total)) s
-        peak footprint: \(String(format: "%.0f", s.peakMemMB)) MB
-        """
-    }
-
-    private static func sec(_ t: Double) -> String {
-        String(format: "%.2f", t) + " s"
-    }
-}
-
-/// Owns the loaded models across runs. The UNet must be reloaded when the
-/// compute-unit set or the attention variant changes; the VAE never does.
-final class Engine {
-    private var inference: Inference?
-    private var loadedUnits: ComputeUnitsOption?
-    private var loadedVariant: AttentionVariant?
-    private var lastLoad: Double = 0
-
-    func run(units: ComputeUnitsOption, variant: AttentionVariant, photo: UIImage,
-             seed: UInt64, forceLoad: Bool,
-             onStage: @escaping (String) -> Void,
-             steps: Int = Spatial.defaultSteps) throws -> (UIImage, RunStats) {
-        if inference == nil || loadedUnits != units || loadedVariant != variant {
-            onStage("Loading \(variant.label) on \(units.label)…")
-            // Drop the outgoing models BEFORE loading: two UNets at once is
-            // 5.7 GB on a run whose whole question is headroom (build 10).
-            inference?.release()
-            inference = nil
-            loadedUnits = nil
-            loadedVariant = nil
-            let inf = Inference()
-            lastLoad = try inf.loadModels(units: units, variant: variant, force: forceLoad)
-            inference = inf
-            loadedUnits = units
-            loadedVariant = variant
-        }
-        guard let inference else { throw PipError.model("engine not ready") }
-        var (img, stats) = try inference.generate(from: photo, seed: seed,
-                                                 steps: steps, onStage: onStage)
-        stats.modelLoad = lastLoad
-        stats.units = inference.effectiveUnits.rawValue
-        return (img, stats)
     }
 }
 
