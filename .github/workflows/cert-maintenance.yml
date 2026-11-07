@@ -54,7 +54,7 @@ jobs:
           set -euo pipefail
           for TYPE in DISTRIBUTION DEVELOPMENT; do
             echo "=== $TYPE ==="
-            curl -sS -H "Authorization: Bearer $T" \
+            curl -sSG -H "Authorization: Bearer $T" \
               "https://api.appstoreconnect.apple.com/v1/certificates?filter[certificateType]=$TYPE&limit=100" \
               | python3 -c 'import json,sys
           d = json.load(sys.stdin)
