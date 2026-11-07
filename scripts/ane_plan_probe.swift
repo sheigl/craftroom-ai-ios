@@ -5,13 +5,16 @@
 //   * does the Neural Engine accept our graph, per `MLComputeUnits` setting
 //     (`MLComputePlan` op placement: ANE / GPU / CPU per preferred device);
 //   * which operations have no device at all — the reconversion suspects;
+//   * whether the palettized (LUT) weight ops keep a device placement;
 //   * does one real `.cpuAndNeuralEngine` forward survive, how long does it
 //     take, and what is the process footprint (`phys_footprint`), which
 //     distinguishes packed from de-palettized weights by order of magnitude
 //     (~2.9 GB packed / ~7.3 GB fp16 / ~15.3 GB fp32).
 //
 // It is NOT a timing or a memory verdict: the CI runner is Apple silicon
-// macOS, not iPadOS 26 on an M4, so placement can still differ per op.
+// macOS, not iPadOS 26 on an M4, and a virtualized runner may expose neither
+// the ANE nor the GPU — `MLModel.availableComputeDevices` is printed so the
+// log says which devices the plan was actually computed against.
 //
 // Build (swiftc, no Xcode project; needs the macOS 14.4+ SDK for MLComputePlan):
 //   mkdir -p build
@@ -22,10 +25,16 @@
 //
 // Output contract (greppable, one line each):
 //   PLAN label=<l> units=<u> ops=<n> pref_ane=<a> pref_gpu=<g> pref_cpu=<c> unsupported=<x>
-//     UNSUPPORTED <op-name> x<count>          (up to 10, most frequent first)
+//     UNSUPPORTED <op-name> x<count>          (up to 10 compute ops with no device)
+//     NOT_ANE <op-name>@<device> x<count>     (up to 10, ANE config only)
 //   FORWARD label=<l> units=ane ok=<true|false> ms=<t> footprint_mb=<m>
 //   FORWARD label=<l> units=ane ok=false ms=<t> footprint_mb=<m> error=<msg>
 //   SUMMARY label=<l> ...                     (short block, printed last)
+//
+// `ops` counts every operation in the plan; weight-materializing ops
+// (`const`, `constexpr_lut_to_dense`, …) are reported separately as
+// `weight_ops` and never counted as unsupported. `unsupported` therefore means
+// "a compute op that no available device can take".
 //
 // A failed forward is data, not an error: the log is the deliverable. The
 // process exits non-zero only when it cannot run at all (bad arguments).
@@ -61,23 +70,25 @@ struct ProbeFailure: LocalizedError {
 
 // MARK: - Device classification
 
-/// Classify an `MLComputeDevice` without pattern-matching its cases.
+/// Classify a compute device without pattern-matching its enum cases.
 ///
-/// `MLComputeDevice` gained associated values between SDK releases and the
-/// optionality of `MLComputePlan.DeviceUsage.preferred` is not identical across
-/// documentation and headers, so this probe goes through `String(describing:)`
-/// — stable in both shapes — instead of a `switch` that may fail to compile on
-/// a different Xcode. Any unexpected device is reported under its own name.
+/// `MLComputeDevice` carries associated device objects and its
+/// `String(describing:)` prints the payload (e.g. `MLCPUComputeDevice: 0x…`,
+/// `MLNeuralEngineComputeDevice`), and the optionality of
+/// `MLComputePlan.DeviceUsage.preferred` differs between SDK releases. Matching
+/// on the description keeps this compiling and correct across both shapes.
 func deviceKind(_ value: Any?) -> String {
     guard let value else { return "none" }
     var text = String(describing: value)
     while text.hasPrefix("Optional(") && text.hasSuffix(")") {
         text = String(text.dropFirst("Optional(".count).dropLast())
     }
-    if text.hasPrefix("neuralEngine") { return "ane" }
-    if text.hasPrefix("gpu") { return "gpu" }
-    if text.hasPrefix("cpu") { return "cpu" }
-    return text.isEmpty ? "none" : text
+    if text.isEmpty || text == "nil" { return "none" }
+    let lowered = text.lowercased()
+    if lowered.contains("neuralengine") { return "ane" }
+    if lowered.contains("gpu") { return "gpu" }
+    if lowered.contains("cpu") { return "cpu" }
+    return text
 }
 
 // MARK: - Plan walk
@@ -87,26 +98,54 @@ struct PlanStats {
     var ane = 0
     var gpu = 0
     var cpu = 0
+    /// Compute ops that no available device can take.
     var unsupported = 0
+    /// Weight-materializing ops (`const`, LUT/affine dequantization): packing
+    /// bookkeeping, not compute — never counted as unsupported.
+    var weightOps = 0
     var unsupportedByName: [String: Int] = [:]
+    /// Placement of palettized weight ops, e.g. ["none": 1194].
+    var lutByDevice: [String: Int] = [:]
+    /// Non-ANE placement, keyed "<operator>@<device>".
+    var nonANE: [String: Int] = [:]
+}
+
+func isWeightOp(_ name: String) -> Bool {
+    let lowered = name.lowercased()
+    return lowered == "const" || lowered.hasPrefix("constexpr_") || lowered.hasPrefix("const_")
 }
 
 @available(macOS 15.0, *)
 func record(usage: MLComputePlan.DeviceUsage?, name: String, into stats: inout PlanStats) {
     stats.ops += 1
-    // A nil usage (or an empty supported set) means no device can take the op.
-    guard let usage, !usage.supported.isEmpty else {
-        stats.unsupported += 1
-        stats.unsupportedByName[name, default: 0] += 1
+    var kind = "none"
+    if let usage, !usage.supported.isEmpty {
+        kind = deviceKind(usage.preferred)
+    }
+    let isWeight = isWeightOp(name)
+    if isWeight {
+        stats.weightOps += 1
+        if name.lowercased().contains("lut") {
+            stats.lutByDevice[kind, default: 0] += 1
+        }
         return
     }
-    switch deviceKind(usage.preferred) {
-    case "ane": stats.ane += 1
-    case "gpu": stats.gpu += 1
-    case "cpu": stats.cpu += 1
-    case let other:
+    switch kind {
+    case "ane":
+        stats.ane += 1
+    case "gpu":
+        stats.gpu += 1
+        stats.nonANE["\(name)@gpu", default: 0] += 1
+    case "cpu":
+        stats.cpu += 1
+        stats.nonANE["\(name)@cpu", default: 0] += 1
+    case "none":
         stats.unsupported += 1
-        stats.unsupportedByName["\(name)[device=\(other)]", default: 0] += 1
+        stats.unsupportedByName[name, default: 0] += 1
+    default:
+        stats.unsupported += 1
+        stats.unsupportedByName["\(name)@\(kind)", default: 0] += 1
+        stats.nonANE["\(name)@\(kind)", default: 0] += 1
     }
 }
 
@@ -183,8 +222,8 @@ func contractShape(_ name: String) -> [Int]? {
     }
 }
 
-func elementSize(_ type: MLMultiArrayDataType) -> Int? {
-    switch type {
+func elementSize(_ dataType: MLMultiArrayDataType) -> Int? {
+    switch dataType {
     case .float16: return 2
     case .float32: return 4
     case .double: return 8
@@ -253,6 +292,21 @@ func attemptForward(modelURL: URL, label: String) -> (ok: Bool, ms: Double) {
         let ms = elapsedMS(since: predictionStart)
         emit("INFO output=\(output.featureNames.sorted().joined(separator: ","))")
         emit("FORWARD label=\(label) units=ane ok=true ms=\(number(ms)) footprint_mb=\(number(footprintMB()))")
+
+        // A second prediction separates "weights unpacked once" from "unpacked
+        // per step": the footprint after it is the real residency. Skipped when
+        // the first one was already slow, so the job stays inside its timeout.
+        if ms < 120_000 {
+            let repeatStart = DispatchTime.now()
+            do {
+                _ = try model.prediction(from: provider)
+                emit("INFO forward_repeat ok=true ms=\(number(elapsedMS(since: repeatStart))) footprint_mb=\(number(footprintMB()))")
+            } catch {
+                emit("INFO forward_repeat ok=false error=\(oneLine(error.localizedDescription))")
+            }
+        } else {
+            emit("INFO forward_repeat skipped=slow ms=\(number(ms))")
+        }
         return (true, ms)
     } catch {
         let ms = elapsedMS(since: start)
@@ -270,6 +324,12 @@ struct UnitsProbe {
     var structure = "unknown"
     var planMS = 0.0
     var failed = false
+}
+
+func topCounts(_ counts: [String: Int], limit: Int) -> [(key: String, value: Int)] {
+    counts.sorted { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }
+        .prefix(limit)
+        .map { (key: $0.key, value: $0.value) }
 }
 
 @main
@@ -291,7 +351,7 @@ struct ANEPlanProbe {
             exit(2)
         }
 
-        emit("INFO tool=ane_plan_probe v1 label=\(label) model=\(modelURL.path)")
+        emit("INFO tool=ane_plan_probe v2 label=\(label) model=\(modelURL.path)")
         emit("INFO host=\(ProcessInfo.processInfo.operatingSystemVersionString) footprint_start_mb=\(number(footprintMB()))")
 
         var probes = [
@@ -301,6 +361,17 @@ struct ANEPlanProbe {
         ]
 
         if #available(macOS 15.0, *) {
+            // Which devices the plan is actually computed against: a virtualized
+            // runner may expose neither the ANE nor the GPU, in which case every
+            // op can only be preferred to the CPU.
+            let devices = MLModel.availableComputeDevices
+            emit("INFO available_compute_devices="
+                + devices.map { deviceKind($0) }.joined(separator: ",")
+                + " raw=\(devices)")
+            if !devices.contains(where: { deviceKind($0) == "ane" }) {
+                emit("WARN no_ane_device_on_host plausible=false for ANE placement")
+            }
+
             for index in probes.indices {
                 let configuration = MLModelConfiguration()
                 configuration.computeUnits = probes[index].units
@@ -322,13 +393,20 @@ struct ANEPlanProbe {
                 emit("PLAN label=\(label) units=\(probe.name) ops=\(probe.stats.ops) "
                     + "pref_ane=\(probe.stats.ane) pref_gpu=\(probe.stats.gpu) "
                     + "pref_cpu=\(probe.stats.cpu) unsupported=\(probe.stats.unsupported)")
-                let top = probe.stats.unsupportedByName
-                    .sorted { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }
-                    .prefix(10)
-                for (name, count) in top {
+                for (name, count) in topCounts(probe.stats.unsupportedByName, limit: 10) {
                     emit("  UNSUPPORTED \(name) x\(count)")
                 }
-                emit("INFO plan_load_ms=\(number(probe.planMS)) units=\(probe.name) structure=\(probe.structure)")
+                if probe.units == .cpuAndNeuralEngine {
+                    for (name, count) in topCounts(probe.stats.nonANE, limit: 10) {
+                        emit("  NOT_ANE \(name) x\(count)")
+                    }
+                }
+                let lut = probe.stats.lutByDevice.sorted { $0.key < $1.key }
+                    .map { "\($0.key):\($0.value)" }
+                    .joined(separator: ",")
+                emit("INFO plan_detail units=\(probe.name) structure=\(probe.structure) "
+                    + "plan_load_ms=\(number(probe.planMS)) weight_ops=\(probe.stats.weightOps) "
+                    + "lut_placement=\(lut.isEmpty ? "none" : lut)")
             }
         } else {
             emit("ERROR MLComputePlan requires macOS 15.0 or newer — plan lines skipped")
@@ -341,12 +419,11 @@ struct ANEPlanProbe {
         for probe in probes {
             emit("  SUMMARY units=\(probe.name) ops=\(probe.stats.ops) pref_ane=\(probe.stats.ane) "
                 + "pref_gpu=\(probe.stats.gpu) pref_cpu=\(probe.stats.cpu) "
-                + "unsupported=\(probe.stats.unsupported) structure=\(probe.structure)")
+                + "unsupported=\(probe.stats.unsupported) weight_ops=\(probe.stats.weightOps) "
+                + "structure=\(probe.structure)")
         }
         let ane = probes[0].stats
-        let topUnsupported = ane.unsupportedByName
-            .sorted { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }
-            .prefix(3)
+        let topUnsupported = topCounts(ane.unsupportedByName, limit: 3)
             .map { "\($0.key)x\($0.value)" }
             .joined(separator: ",")
         emit("  SUMMARY ane_units ops=\(ane.ops) ane_share=\(number(ane.ops == 0 ? 0 : 100.0 * Double(ane.ane) / Double(ane.ops)))% "

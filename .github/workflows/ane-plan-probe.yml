@@ -66,6 +66,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Resolve variant
+        id: variant
         run: |
           set -euo pipefail
           if [ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ]; then
@@ -84,6 +85,7 @@ jobs:
             echo "::error::missing variant (label='${LABEL:-}' parts='${PARTS:-}')"
             exit 1
           fi
+          echo "label=$LABEL" >> "$GITHUB_OUTPUT"
           echo "resolved label=$LABEL package=${PKG_INPUT:-<auto>}"
           echo "resolved parts=$PARTS"
 
@@ -91,8 +93,13 @@ jobs:
         run: |
           sw_vers
           uname -m
-          xcrun --sdk macosx --show-sdk-version
+          sysctl -n machdep.cpu.brand_string || true
           sysctl -n hw.memsize | awk '{printf "ram_gb=%.1f\n", $1/1073741824}'
+          xcrun --sdk macosx --show-sdk-version
+          # Apple-silicon runners are VMs: without an ANE/GPU device in the guest
+          # the plan can only prefer the CPU, which limits the verdict.
+          ioreg -c AppleH11ANEInterface 2>/dev/null | head -3 || true
+          ioreg -c AGXAccelerator 2>/dev/null | grep -c AGXAcceleratorG13 || true
           df -h /
           echo "label=$LABEL package_input=${PKG_INPUT:-<auto>}"
 
@@ -196,7 +203,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ane-plan-probe-${{ inputs.label }}
+          name: ane-plan-probe-${{ steps.variant.outputs.label }}
           path: |
             probe.log
             compile.log
