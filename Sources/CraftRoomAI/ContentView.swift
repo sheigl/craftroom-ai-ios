@@ -89,6 +89,15 @@ struct ContentView: View {
             logText = Diagnostics.tail()
             payload = PayloadStore.shared.state
             variant = AttentionVariant(rawValue: PayloadStore.shared.variant) ?? .sdpa
+            if case .missing = payload, autoLadder() != nil {
+                // Unattended run (bundled or pushed ladder): start the payload
+                // download with no tap. Build 9's whole point is that opening
+                // the app is the only gesture the T5 checklist needs.
+                Diagnostics.log("auto: payload missing, starting download unattended")
+                Telemetry.send("auto: payload missing, starting download unattended "
+                               + "(base \(PayloadStore.shared.baseURL))")
+                startDownload()
+            }
             maybeStartAuto()
         }
         .overlay {
@@ -187,6 +196,8 @@ struct ContentView: View {
             .flatMap { try? $0.bytes(forVariant: variant.rawValue) } ?? 0) / 1_048_576
         payload = .downloading(fraction: 0, doneMB: 0, totalMB: totalMB)
         status = "Downloading models…"
+        Telemetry.send("payload: download start, base \(PayloadStore.shared.baseURL) "
+                       + "variant \(variant.rawValue) (~\(totalMB / 1024) GB)")
         Task {
             let dl = Task { try await PayloadStore.shared.downloadAll() }
             let poll = Task {
@@ -209,10 +220,14 @@ struct ContentView: View {
                 maybeStartAuto()
                 status = "Models installed. Pick a photo to begin."
                 logText = Diagnostics.tail()
+                Telemetry.send("payload: installed \(variant.rawValue), "
+                               + "starting ladder check")
             } catch {
                 poll.cancel()
                 let msg = error.localizedDescription
                 Diagnostics.log("payload download failed: \(msg)")
+                Telemetry.send("payload download failed: \(msg) "
+                               + "(base \(PayloadStore.shared.baseURL))")
                 payload = .failed(msg)
                 status = "Download failed."
             }
@@ -288,11 +303,15 @@ struct ContentView: View {
     //                  --steps=30 --seed=42
     //  2. Documents/auto.json:
     //       {"cells":[{"units":"all","model":"sdpa","steps":1,"seed":42}, …]}
+    //  3. (build 9, no USB) bundled auto_default.json — units × attention ×
+    //     steps full matrix, runs once; Documents/auto_default.done marks it.
     // Cells run back to back; each ends with one AUTO-RESULT line in
     // Documents/ladder.log (never truncated), then auto.json becomes
-    // auto.done.json so a relaunch does not repeat the ladder. Timing is
+    // auto.done.json (or the done marker is written) so a relaunch does not
+    // repeat the ladder. Timing is
     // content-independent (fixed graph), so the bundled test photo is enough.
     // The screen is held awake by the app itself and painted black.
+    // Every ladder.log line is also POSTed to the LAN collector (Telemetry).
 
     struct AutoCell {
         var units: ComputeUnitsOption
@@ -319,16 +338,25 @@ struct ContentView: View {
         AttentionVariant(rawValue: s ?? "") ?? .sdpa
     }
 
+    enum AutoSource { case launchArgs, documents, bundled }
+
     private static func autoJSONURL() -> URL? {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)
             .first?.appendingPathComponent("auto.json")
     }
 
-    private func autoLadder() -> [AutoCell]? {
-        if let single = launchArgCell() { return [single] }
-        guard let url = Self.autoJSONURL(),
-              let data = try? Data(contentsOf: url),
-              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+    /// Written after a BUNDLED ladder completes so a relaunch never repeats
+    /// the hours-long matrix (the pushed-file equivalent is the rename to
+    /// auto.done.json).
+    private static func autoDefaultDoneURL() -> URL? {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)
+            .first?.appendingPathComponent("auto_default.done")
+    }
+
+    /// `{"cells":[{units, model, steps, seed}, …]}` — same protocol for the
+    /// pushed auto.json and the bundled auto_default.json.
+    private static func parseCells(_ data: Data) -> [AutoCell]? {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let raw = root["cells"] as? [[String: Any]], !raw.isEmpty else { return nil }
         return raw.map { c in
             AutoCell(units: Self.units(from: c["units"] as? String),
@@ -337,6 +365,22 @@ struct ContentView: View {
                                         ?? (c["maxSteps"] as? NSNumber)?.intValue ?? 30)),
                      seed: (c["seed"] as? NSNumber)?.uint64Value ?? 42)
         }
+    }
+
+    /// Ladder cells and their source. Priority: launch args →
+    /// Documents/auto.json (still wins) → bundled auto_default.json, which is
+    /// skipped once auto_default.done marks a finished run.
+    private func autoLadder() -> (cells: [AutoCell], source: AutoSource)? {
+        if let single = launchArgCell() { return ([single], .launchArgs) }
+        if let url = Self.autoJSONURL(),
+           let data = try? Data(contentsOf: url),
+           let cells = Self.parseCells(data) { return (cells, .documents) }
+        if let done = Self.autoDefaultDoneURL(),
+           FileManager.default.fileExists(atPath: done.path) { return nil }
+        if let url = Bundle.main.url(forResource: "auto_default", withExtension: "json"),
+           let data = try? Data(contentsOf: url),
+           let cells = Self.parseCells(data) { return (cells, .bundled) }
+        return nil
     }
 
     private func launchArgCell() -> AutoCell? {
@@ -353,11 +397,13 @@ struct ContentView: View {
     }
 
     private func maybeStartAuto() {
-        guard !autoStarted, let cells = autoLadder() else { return }
+        guard !autoStarted, let auto = autoLadder() else { return }
+        let cells = auto.cells
         guard case .ready = payload else {
             if !autoWaitLogged {
                 autoWaitLogged = true
                 Diagnostics.log("auto: waiting for payload install")
+                Telemetry.send("auto: waiting for payload install (base \(PayloadStore.shared.baseURL))")
             }
             return
         }
@@ -368,14 +414,17 @@ struct ContentView: View {
             return
         }
         autoDim = true
-        run(preferredPhoto: img, ladder: cells)
-        Diagnostics.log("auto: \(cells.count) cell(s) — "
-            + cells.map(\.label).joined(separator: " · "))
+        let startLine = "auto: \(cells.count) cell(s) [\(auto.source)] — "
+            + cells.map(\.label).joined(separator: " · ")
+        run(preferredPhoto: img, ladder: cells, ladderSource: auto.source)
+        Diagnostics.log(startLine)
+        Telemetry.send(startLine)
     }
 
     // MARK: run
 
-    private func run(preferredPhoto: UIImage? = nil, ladder: [AutoCell]? = nil) {
+    private func run(preferredPhoto: UIImage? = nil, ladder: [AutoCell]? = nil,
+                     ladderSource: AutoSource = .documents) {
         guard let photo = preferredPhoto ?? photo else { return }
         let cells = ladder ?? [AutoCell(
             units: units,
@@ -441,6 +490,7 @@ struct ContentView: View {
                     let msg = error.localizedDescription
                     let failedAt = lastStage
                     Diagnostics.log("ERROR at \(failedAt): \(msg)")
+                    Telemetry.send("ERROR at \(failedAt): \(msg)")
                     await MainActor.run {
                         status = "\(failedAt) failed: \(msg)"
                         logText = Diagnostics.tail()
@@ -453,11 +503,23 @@ struct ContentView: View {
                     + (aborted ? ", aborted early" : "") + ")"
                 Diagnostics.log(done)
                 Self.appendLadder(done)
-                if let url = Self.autoJSONURL() {
-                    let doneURL = url.deletingLastPathComponent()
-                        .appendingPathComponent("auto.done.json")
-                    try? FileManager.default.removeItem(at: doneURL)
-                    try? FileManager.default.moveItem(at: url, to: doneURL)
+                switch ladderSource {
+                case .launchArgs:
+                    break
+                case .documents:
+                    if let url = Self.autoJSONURL() {
+                        let doneURL = url.deletingLastPathComponent()
+                            .appendingPathComponent("auto.done.json")
+                        try? FileManager.default.removeItem(at: doneURL)
+                        try? FileManager.default.moveItem(at: url, to: doneURL)
+                    }
+                case .bundled:
+                    // run-once marker: the bundled matrix must not restart on
+                    // a relaunch (mirrors the auto.json → auto.done.json move)
+                    if let marker = Self.autoDefaultDoneURL() {
+                        let text = "auto_default ladder complete \(Date())\n"
+                        try? text.data(using: .utf8)?.write(to: marker, options: .atomic)
+                    }
                 }
             }
             await MainActor.run {
@@ -470,7 +532,9 @@ struct ContentView: View {
     }
 
     /// Durable copy of the ladder results: phaseA.log is reset per launch, so
-    /// the cells also accumulate here (never truncated).
+    /// the cells also accumulate here (never truncated). Every line is also
+    /// POSTed to the LAN collector (fire-and-forget), which is how the T5
+    /// orchestrator watches the ladder without a USB cable.
     private static func appendLadder(_ line: String) {
         guard let url = FileManager.default.urls(for: .documentDirectory,
                                                  in: .userDomainMask).first?
@@ -483,6 +547,7 @@ struct ContentView: View {
         } else {
             try? data.write(to: url, options: .atomic)
         }
+        Telemetry.send(line)
     }
 
     /// One machine-readable line per ladder cell. Keeps the v0.4 field names

@@ -12,7 +12,7 @@ settings:
   base:
     SWIFT_VERSION: "5"
     MARKETING_VERSION: "0.5.0"
-    CURRENT_PROJECT_VERSION: "8"
+    CURRENT_PROJECT_VERSION: "9"
     TARGETED_DEVICE_FAMILY: "2"          # iPad
     IPHONEOS_DEPLOYMENT_TARGET: "17.0"
 # v0.5: the harness core (canny_edge_v1, baked Euler schedule, payload manifest
@@ -44,6 +44,10 @@ targets:
       # auto mode's synthetic photo (timing is content-independent; see
       # ContentView.autoConfig)
       - path: Resources/testphoto/test_photo.jpg
+        buildPhase: resources
+      # build 9: bundled unattended ladder (units × attention × steps), used
+      # when no Documents/auto.json is pushed — auto mode with no USB cable.
+      - path: Resources/auto/auto_default.json
         buildPhase: resources
     info:
       path: Support/Info.plist
@@ -83,6 +87,19 @@ targets:
         # report, so the log must be pullable from Finder.
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
+        # Build 9 (T5, no USB): the payload download and the wireless ladder
+        # telemetry talk plain HTTP to the LAN dev server (192.168.68.83:8123).
+        # Without an ATS exception iOS blocks the http:// loads outright, which
+        # is why build 8 could never start its download. Scoped to that one
+        # host — NSAllowsArbitraryLoads stays out. NSAllowsLocalNetworking is
+        # the documented companion for local-network loads (the exception-domain
+        # key is matched as a string, so it works for the IP literal too).
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+          NSExceptionDomains:
+            192.168.68.83:
+              NSExceptionAllowsInsecureHTTPLoads: true
+              NSIncludesSubdomains: false
     # Optional-but-load-bearing for Phase A: on a 12 GB iPad the default
     # per-process jetsam budget is a few GB, and the whole question is whether
     # ~3.6 GB of int8 weights fit. This entitlement asks iOS for the larger

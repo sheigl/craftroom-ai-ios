@@ -35,9 +35,10 @@ enum PayloadState: Equatable {
 /// `CraftRoomCore`'s `device_manifest_v2.json` into
 /// `Application Support/CraftRoomPayload/`, one file at a time:
 ///
-///  * **base URL** — the manifest's CDN base by default; a single line in
-///    `Documents/payload_base_url.txt` overrides it (T5 points the iPad at the
-///    LAN server, `http://192.168.68.83:<port>/device_v2/payload/`).
+///  * **base URL** — `Documents/payload_base_url.txt` (one line) wins; else
+///    the baked dev default `http://192.168.68.83:8123/device_v2/payload/`
+///    (LAN server, build 9+); else the manifest's CDN base. The active base
+///    is logged ("payload: base ... source ..."). T5 needs no file push.
 ///  * **variant** — `sdpa` (default) or `split_einsum`; only that 2.87 GB UNet
 ///    subtree plus the shared files is fetched, so switching attention layouts
 ///    costs one model, not a second payload.
@@ -70,6 +71,13 @@ final class PayloadStore: NSObject, URLSessionDataDelegate {
     private let defaults = UserDefaults.standard
     private static let variantDefaultsKey = "payload.variant"
 
+    /// Baked dev default for the v0.5 T5 runs (build 9): the LAN payload
+    /// server. Used only when `Documents/payload_base_url.txt` is absent, so
+    /// a pushed file still overrides it and a production build can restore the
+    /// manifest base by passing nil. Build 8 shipped without this and, with no
+    /// file pushed, tried the unbaked HF placeholder and died.
+    static let devLANBase = "http://192.168.68.83:8123/device_v2/payload/"
+
     private override init() {
         let baseDir = FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -86,7 +94,8 @@ final class PayloadStore: NSObject, URLSessionDataDelegate {
             let saved = defaults.string(forKey: Self.variantDefaultsKey)
             variantKey = (saved.flatMap { m.variants[$0] != nil ? $0 : nil }) ?? m.defaultVariant
             base = PayloadBaseURL.resolve(manifestBase: m.urlBase,
-                                          documents: Self.documentsURL)
+                                          documents: Self.documentsURL,
+                                          devDefault: Self.devLANBase)
         }
         DiagnosticsShim.sink = { Diagnostics.log($0) }
     }
@@ -211,7 +220,8 @@ final class PayloadStore: NSObject, URLSessionDataDelegate {
             throw PipError.badPayload("device_manifest_v2.json missing from CraftRoomCore")
         }
         if base.isEmpty { base = PayloadBaseURL.resolve(manifestBase: m.urlBase,
-                                                        documents: Self.documentsURL) }
+                                                        documents: Self.documentsURL,
+                                                        devDefault: Self.devLANBase) }
         refreshTotals()
         let pending = entries.filter { !Self.fileComplete($0, in: root) }
         settledBytes = totalBytes - pending.reduce(0) { $0 + $1.size }

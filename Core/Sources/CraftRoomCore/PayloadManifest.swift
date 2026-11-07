@@ -113,10 +113,11 @@ public struct PayloadManifestV2: Codable, Equatable {
 
 /// Resolves the payload base URL with the T5 LAN override.
 ///
-/// Order: `Documents/payload_base_url.txt` (trimmed, one line) → the
-/// manifest's `urlBase`. The override exists so a device run can be pointed at
-/// a local `python3 -m http.server` without rebuilding or re-uploading the
-/// 3 GB payload; an empty or scheme-less file is ignored (and reported), never
+/// Order: `Documents/payload_base_url.txt` (trimmed, one line) → a baked dev
+/// default (LAN server, passed by the app) → the manifest's `urlBase`. The
+/// override exists so a device run can be pointed at a local
+/// `python3 -m http.server` without rebuilding or re-uploading the 3 GB
+/// payload; an empty or scheme-less file is ignored (and reported), never
 /// silently treated as a path.
 public enum PayloadBaseURL {
     public static let overrideFileName = "payload_base_url.txt"
@@ -133,16 +134,37 @@ public enum PayloadBaseURL {
     }
 
     /// The base the downloader must use.
-    public static func resolve(manifestBase: String, documents: URL?) -> String {
-        guard let documents, let raw = override(in: documents) else { return manifestBase }
-        var base = raw
-        guard base.contains("://") else {
-            DiagnosticsShim.log("payload: ignoring \(overrideFileName) without a scheme: \(raw)")
-            return manifestBase
+    ///
+    /// Priority: `Documents/payload_base_url.txt` → `devDefault` (the baked LAN
+    /// server of the v0.5 dev builds — build 8 shipped only the CDN
+    /// placeholder, and with no file pushed the download died before it
+    /// started) → the manifest's `urlBase`. Every branch logs which base is
+    /// active, so `ladder.log`/telemetry always shows where bytes come from.
+    public static func resolve(manifestBase: String, documents: URL?,
+                               devDefault: String? = nil) -> String {
+        let fallback = normalized(devDefault) ?? manifestBase
+        if let documents, let raw = override(in: documents) {
+            var base = raw
+            guard base.contains("://") else {
+                DiagnosticsShim.log("payload: ignoring \(overrideFileName) without a scheme: \(raw)")
+                return fallback
+            }
+            if !base.hasSuffix("/") { base += "/" }
+            DiagnosticsShim.log("payload: base \(base) (source: \(overrideFileName))")
+            return base
         }
-        if !base.hasSuffix("/") { base += "/" }
-        DiagnosticsShim.log("payload: base override \(base)")
-        return base
+        if normalized(devDefault) != nil {
+            DiagnosticsShim.log("payload: base \(fallback) (source: baked dev default, "
+                                + "no \(overrideFileName))")
+            return fallback
+        }
+        DiagnosticsShim.log("payload: base \(manifestBase) (source: manifest urlBase)")
+        return manifestBase
+    }
+
+    private static func normalized(_ base: String?) -> String? {
+        guard let base, !base.isEmpty else { return nil }
+        return base.hasSuffix("/") ? base : base + "/"
     }
 }
 

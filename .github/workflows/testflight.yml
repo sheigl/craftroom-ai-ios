@@ -86,6 +86,10 @@ jobs:
           /usr/libexec/PlistBuddy -c "Print :UIFileSharingEnabled" Support/Info.plist
           /usr/libexec/PlistBuddy -c "Print :ITSAppUsesNonExemptEncryption" Support/Info.plist
           /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" Support/Info.plist
+          # Build 9 (T5, no USB): the LAN ATS exception must be present in the
+          # SIGNED plist — without it iOS blocks the http:// payload download
+          # and the ladder telemetry, and a signed bundle cannot be repaired.
+          /usr/libexec/PlistBuddy -c "Print :NSAppTransportSecurity:NSExceptionDomains:192.168.68.83:NSExceptionAllowsInsecureHTTPLoads" Support/Info.plist
           # The memory ceiling the whole measurement depends on: the project
           # must point at an entitlements file, and the file must carry the
           # increased-memory-limit key.

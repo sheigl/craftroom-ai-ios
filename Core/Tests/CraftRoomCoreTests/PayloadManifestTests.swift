@@ -111,4 +111,32 @@ final class PayloadManifestTests: XCTestCase {
         let json = #"{"version":"device-v1","urlBase":"x","models":[],"variants":{},"defaultVariant":"sdpa","files":[],"totalBytes":0}"#
         XCTAssertThrowsError(try PayloadManifestV2.decode(Data(json.utf8)))
     }
+
+    /// Build 9 bakes the LAN dev server as the fallback base so a fresh
+    /// install downloads the payload with no file push; the override file
+    /// still wins whenever it is present.
+    func testBakedDevDefaultFallsOutWhenNoOverrideFile() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("payload-base-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let lan = "http://192.168.68.83:8123/device_v2/payload"
+        let lanSlash = "http://192.168.68.83:8123/device_v2/payload/"
+        // no file → baked dev default, slash-normalised
+        XCTAssertEqual(PayloadBaseURL.resolve(manifestBase: "https://cdn/x", documents: dir,
+                                              devDefault: lan), lanSlash)
+        // an override file still wins
+        let file = dir.appendingPathComponent(PayloadBaseURL.overrideFileName)
+        try "http://192.168.68.20:9/other/".write(to: file, atomically: true, encoding: .utf8)
+        XCTAssertEqual(PayloadBaseURL.resolve(manifestBase: "https://cdn/x", documents: dir,
+                                              devDefault: lan), "http://192.168.68.20:9/other/")
+        // scheme-less file is ignored → baked default, never the CDN placeholder
+        try "192.168.68.20:9".write(to: file, atomically: true, encoding: .utf8)
+        XCTAssertEqual(PayloadBaseURL.resolve(manifestBase: "https://cdn/x", documents: dir,
+                                              devDefault: lan), lanSlash)
+        // no dev default passed (production call) → manifest base, as before
+        XCTAssertEqual(PayloadBaseURL.resolve(manifestBase: "https://cdn/x", documents: dir),
+                       "https://cdn/x")
+    }
 }
