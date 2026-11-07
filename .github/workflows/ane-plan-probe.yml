@@ -39,6 +39,13 @@ on:
         required: true
         default: unlabeled
         type: string
+  # Bootstrap path, only until this file is on the default branch: GitHub only
+  # dispatches workflows that exist there, so a push to the probe branch may
+  # carry the variant in its commit message instead, e.g.
+  #   ane-probe label=6bit-sdpa package=<name>.mlpackage parts=<url>,<url>
+  # Pushes without that marker (like the commit that adds this file) are skipped.
+  push:
+    branches: [ci/ane-probe]
 
 concurrency:
   group: ane-plan-probe-${{ inputs.label }}
@@ -48,12 +55,35 @@ jobs:
   probe:
     runs-on: macos-15
     timeout-minutes: 120
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, 'ane-probe label=')
     env:
       LABEL: ${{ inputs.label }}
       PKG_INPUT: ${{ inputs.package_name }}
       PARTS: ${{ inputs.parts }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Resolve variant
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ]; then
+            message=$(git log -1 --pretty=%B)
+            marker=$(printf '%s\n' "$message" | grep -o 'ane-probe label=.*' | head -n 1 || true)
+            LABEL=$(printf '%s' "$marker" | sed -n 's/.* label=\([^ ]*\).*/\1/p')
+            PKG_INPUT=$(printf '%s' "$marker" | sed -n 's/.* package=\([^ ]*\).*/\1/p')
+            PARTS=$(printf '%s' "$marker" | sed -n 's/.* parts=\([^ ]*\).*/\1/p')
+            {
+              echo "LABEL=$LABEL"
+              echo "PKG_INPUT=$PKG_INPUT"
+              echo "PARTS=$PARTS"
+            } >> "$GITHUB_ENV"
+          fi
+          if [ -z "${LABEL:-}" ] || [ -z "${PARTS:-}" ]; then
+            echo "::error::missing variant (label='${LABEL:-}' parts='${PARTS:-}')"
+            exit 1
+          fi
+          echo "resolved label=$LABEL package=${PKG_INPUT:-<auto>}"
+          echo "resolved parts=$PARTS"
 
       - name: Runner inventory
         run: |

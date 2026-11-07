@@ -15,6 +15,12 @@ the macOS 15 `MLComputePlan` API). One job per variant, ~20 min.
 `package_name` may be left empty: the workflow then uses the only `.mlpackage` in
 the unzipped tree. `label` is echoed in every `PLAN`/`FORWARD` line.
 
+> **Before this file is on the default branch** GitHub refuses `workflow_dispatch`
+> for it (a dispatchable workflow must exist on `main`), so the branch also accepts
+> a `push` whose commit message carries the variant
+> (`ane-probe label=... package=... parts=...`). Pushes without that marker are
+> skipped. Both invocations below work as soon as the file is on `main`.
+
 ### 6-bit `split_einsum` variant (release `spike-t3-2026-11-06`)
 
 ```sh
