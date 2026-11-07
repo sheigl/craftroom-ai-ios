@@ -27,7 +27,7 @@ public enum LadderUnits: String, CaseIterable, Equatable {
               !key.isEmpty else { return nil }
         switch key {
         case "cpuonly", "cpu":                            return .cpuOnly
-        case "cpuandneuralengine", "ane", "ne", "neuralengine":
+        case "cpuandneuralengine", "cpuane", "ane", "ne", "neuralengine":
             return .cpuAndNeuralEngine
         case "cpuandgpu", "gpu":                          return .cpuAndGPU
         case "all":                                       return .all
