@@ -195,7 +195,7 @@ jobs:
           {
             echo "### ANE plan probe — $LABEL"
             echo '```'
-            grep -E '^(PLAN |  UNSUPPORTED|FORWARD |SUMMARY|  SUMMARY|INFO |PROBE_EXIT)' probe.log 2>/dev/null | head -80 || true
+            grep -E '^(PLAN |  UNSUPPORTED|  NOT_ANE|FORWARD |SUMMARY|  SUMMARY|INFO |WARN |ERROR |PROBE_EXIT)' probe.log 2>/dev/null | head -80 || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
