@@ -61,8 +61,9 @@ jobs:
           if "errors" in d: print(json.dumps(d["errors"], indent=1)); raise SystemExit(1)
           for c in d.get("data", []):
               a = c["attributes"]
-              print(c["id"], a["certificateType"], a["name"], a["displayName"],
-                    "expires", a["expiresDateTime"][:10], "serial", a.get("serialNumber"))'
+              print(c["id"], a.get("certificateType"), a.get("name"),
+                    a.get("displayName"), "expires", (a.get("expiresDateTime") or "?")[:10],
+                    "serial", a.get("serialNumber"), "rawkeys", sorted(a.keys()))'
           done
 
       - name: Revoke (only when an id was supplied)
