@@ -43,6 +43,9 @@ jobs:
           done
           ls -l pkg.zip
           unzip -q pkg.zip
+          # Free the archive immediately: the fp16 package (7.6 GB zip + 7.6 GB
+          # tree + 7.6 GB output) does not fit a runner disk all at once.
+          rm -f pkg.zip
           ls -d "$PKG"
           du -sh "$PKG"
           echo "--- package identity (must match the Linux build) ---"
