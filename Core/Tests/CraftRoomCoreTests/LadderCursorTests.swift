@@ -141,48 +141,59 @@ final class LadderCursorTests: XCTestCase {
     }
 }
 
-/// The estimated-skip preflight: hypothesis A as an executable rule.
+/// MemoryPreflight v2 (build 11): the refuse/attempt rules the 16 GB ladder needs.
+/// The 6-bit ANE cells' crash-loop is the evidence behind the fp32 CPU rule; the
+/// fp16 payload adds the one case where a refusal IS right before an attempt.
 final class MemoryPreflightTests: XCTestCase {
-    func testEstimateBakesTheContractNumbers() {
+    func testEstimatesBakeTheContractNumbers() {
         // device_v2_io_contract.json: palettized 3,816,113,664 params → 7,277 MiB
-        // of fp16; the unpalettized package measures 7,287 MiB.
-        XCTAssertEqual(MemoryPreflight.palettizedFP16WeightsMiB, 7_250,
-                       accuracy: 1, "baked estimate must stay inside the contract figures")
-        XCTAssertEqual(MemoryPreflight.workingSetMarginMiB, 1_500, accuracy: 0)
+        // of fp16; the unpalettized package measures 7,287 MiB; fp32 doubles it.
+        XCTAssertEqual(MemoryPreflight.fp16WeightsMiB, 7_250)
+        XCTAssertEqual(MemoryPreflight.cpuUnpackedFP32MiB, 14_600)
+        XCTAssertEqual(MemoryPreflight.packed6BitMiB, 3_000)
+        XCTAssertEqual(MemoryPreflight.workingSetMarginMiB, 1_500)
     }
 
-    func testOnlyCPUPalettizedCellsGetAnEstimate() {
-        XCTAssertEqual(MemoryPreflight.cpuDequantEstimateMiB(units: "cpuOnly",
-                         modelName: "Unet_ControlNet_canny1200_6bit"),
-                       MemoryPreflight.palettizedFP16WeightsMiB)
-        XCTAssertNil(MemoryPreflight.cpuDequantEstimateMiB(units: "cpuAndNeuralEngine",
-                       modelName: "Unet_ControlNet_canny1200_6bit"),
-                       "ANE keeps the LUT compressed: always attempt")
-        XCTAssertNil(MemoryPreflight.cpuDequantEstimateMiB(units: "all",
-                       modelName: "Unet_ControlNet_canny1200_6bit"))
-        XCTAssertNil(MemoryPreflight.cpuDequantEstimateMiB(units: "cpuOnly",
-                       modelName: "VAEDecoder_sdxl_fp32"), "not a palettized UNet")
-    }
-
-    func testSkipWhenHeadroomCannotHoldDequantizedWeights() {
-        // 10,000 MB left < 7,250 + 1,500 = 8,750 → this one does fit; use a
-        // smaller headroom (what a second model already resident leaves).
-        let tight = MemoryPreflight.decideCell(units: "cpuOnly",
-            modelName: "Unet_ControlNet_canny1200_6bit", headroomMB: 6_000)
-        XCTAssertTrue(tight.isSkip)
-        if case .skip(let reason) = tight {
-            XCTAssertEqual(reason, MemoryPreflight.cpuDequantReason)
-            XCTAssertEqual(reason, "cpu-backend-dequant-estimate")
+    func testCPUIsRefusedForEveryUnetVariant() {
+        for model in ["Unet_ControlNet_canny1200_6bit", "Unet_ControlNet_canny1200_fp16"] {
+            let e = MemoryPreflight.estimate(units: "cpuOnly", modelName: model)!
+            XCTAssertEqual(e.miB, MemoryPreflight.cpuUnpackedFP32MiB,
+                           "the CPU backend widens to fp32 — build-10 climb direction")
+            XCTAssertTrue(e.refuses)
+            let d = MemoryPreflight.decideCell(units: "cpuOnly", modelName: model,
+                                               headroomMB: 12_273)
+            XCTAssertEqual(d, .skip(MemoryPreflight.cpuDequantReason),
+                           "never load a UNet on CPU on the test iPad — even at full budget")
         }
+        XCTAssertNil(MemoryPreflight.estimate(units: "cpuOnly", modelName: "VAEDecoder_sdxl_fp32"),
+                     "not a palettized/fp16 UNet — the caller's own rules apply")
     }
 
-    func testAttemptWhenHeadroomIsClearAndOnANE() {
-        XCTAssertEqual(MemoryPreflight.decideCell(units: "cpuOnly",
-            modelName: "Unet_ControlNet_canny1200_6bit", headroomMB: 12_273), .attempt,
-            "the 16 GB iPad's empty budget clears the estimate — attempt and measure")
+    func testPacked6BitCellsAreNeverRefused() {
+        let e = MemoryPreflight.estimate(units: "cpuAndNeuralEngine",
+                                         modelName: "Unet_ControlNet_canny1200_6bit")!
+        XCTAssertFalse(e.refuses, "the packed-size question is what the cell EXISTS to answer")
+        XCTAssertEqual(e.miB, MemoryPreflight.packed6BitMiB)
         XCTAssertEqual(MemoryPreflight.decideCell(units: "cpuAndNeuralEngine",
             modelName: "Unet_ControlNet_canny1200_6bit", headroomMB: 1_000), .attempt,
-            "ANE/GPU cells are never refused")
+            "ANE/GPU 6-bit cells are never refused")
+    }
+
+    func testFP16OnAcceleratorRefusesOnlyWhenTight() {
+        let e = MemoryPreflight.estimate(units: "all",
+                                         modelName: "Unet_ControlNet_canny1200_fp16")!
+        XCTAssertTrue(e.refuses)
+        XCTAssertEqual(e.miB, MemoryPreflight.fp16WeightsMiB)
+        XCTAssertEqual(MemoryPreflight.decideCell(units: "cpuAndNeuralEngine",
+            modelName: "Unet_ControlNet_canny1200_fp16", headroomMB: 12_273), .attempt,
+            "12.3 GB available > 8,750 MB needed")
+        XCTAssertEqual(MemoryPreflight.decideCell(units: "cpuAndNeuralEngine",
+            modelName: "Unet_ControlNet_canny1200_fp16", headroomMB: 8_000),
+            .skip(MemoryPreflight.fp16WeightsReason),
+            "8 GB available < 8,750 MB needed → jetsam is certain — skip")
+        XCTAssertEqual(MemoryPreflight.decideCell(units: "cpuAndNeuralEngine",
+            modelName: "Unet_ControlNet_canny1200_fp16", headroomMB: 8_750), .attempt,
+            "exactly enough is enough")
     }
 
     func testUnknownHeadroomAttemptsAndForceOverrides() {
@@ -193,14 +204,56 @@ final class MemoryPreflightTests: XCTestCase {
             modelName: "Unet_ControlNet_canny1200_6bit",
             headroomMB: 1_000, force: true), .attempt,
             "auto.json force:true overrides the estimate")
+        XCTAssertEqual(MemoryPreflight.decideCell(units: "all",
+            modelName: "Unet_ControlNet_canny1200_fp16",
+            headroomMB: 1, force: true), .attempt)
     }
 
     func testDetailLineCarriesTheNumbers() {
-        let d = MemoryPreflight.detail(headroomMB: 6_000,
-                                      estimateMB: MemoryPreflight.palettizedFP16WeightsMiB)
+        let d = MemoryPreflight.detail(headroomMB: 8_000,
+                                       estimateMB: MemoryPreflight.fp16WeightsMiB)
         XCTAssertTrue(d.contains("needs 8750 MB"), d)
-        XCTAssertTrue(d.contains("of 6000 MB"), d)
+        XCTAssertTrue(d.contains("of 8000 MB"), d)
         XCTAssertTrue(d.contains("estimate 7250"), d)
+    }
+}
+
+/// Build 11 ladder vocabulary: canonical compute-unit names and PLAN lines.
+final class LadderUnitsTests: XCTestCase {
+    func testCanonicalUnitNames() {
+        XCTAssertEqual(LadderUnits.canonical("cpuAndNeuralEngine"), .cpuAndNeuralEngine)
+        XCTAssertEqual(LadderUnits.canonical("cpuane"), .cpuAndNeuralEngine)
+        XCTAssertEqual(LadderUnits.canonical("ANE"), .cpuAndNeuralEngine)
+        XCTAssertEqual(LadderUnits.canonical("CPUAndGPU"), .cpuAndGPU)
+        XCTAssertEqual(LadderUnits.canonical("gpu"), .cpuAndGPU)
+        XCTAssertEqual(LadderUnits.canonical("cpu_only"), .cpuOnly)
+        XCTAssertEqual(LadderUnits.canonical("all"), .all)
+        XCTAssertEqual(LadderUnits.canonical("tpu"), .all,
+                       "launch-arg parsing keeps the build-10 forgiving default")
+        XCTAssertEqual(LadderUnits.canonical(nil), .all)
+    }
+
+    func testStrictParsingRejectsUnknown() {
+        XCTAssertEqual(LadderUnits.strict("gpu"), .cpuAndGPU)
+        XCTAssertEqual(LadderUnits.strict(" ANE "), .cpuAndNeuralEngine)
+        XCTAssertNil(LadderUnits.strict("tpu"), "matrix files must not mislabel cells")
+        XCTAssertNil(LadderUnits.strict(""))
+        XCTAssertNil(LadderUnits.strict(nil))
+    }
+
+    func testComputePlanLineFormat() {
+        let l = ComputePlanLine.line(variant: "split_einsum", units: "cpuAndNeuralEngine",
+                                     ane: 41_203, cpu: 12, gpu: 0, unsupported: 0)
+        XCTAssertTrue(l.hasPrefix("PLAN variant=split_einsum units=cpuAndNeuralEngine"
+                                  + " ane=41203 cpu=12 gpu=0 unsupported=0"), l)
+        let withExtras = ComputePlanLine.line(variant: "fp16", units: "cpuAndGPU",
+                                              ane: 0, cpu: 5, gpu: 40_000, unsupported: 0,
+                                              planSeconds: 83.4, requiredUnits: "cpuAndGPU")
+        XCTAssertTrue(withExtras.contains("plan_s=83.4"), withExtras)
+        XCTAssertTrue(withExtras.contains("required=cpuAndGPU"), withExtras)
+        let f = ComputePlanLine.failed(variant: "fp16", units: "all",
+                                       error: "MLComputePlan needs iOS 18")
+        XCTAssertTrue(f.hasPrefix("PLAN failed variant=fp16 units=all error="), f)
     }
 }
 

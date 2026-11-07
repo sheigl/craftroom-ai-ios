@@ -1,17 +1,15 @@
 {
-  "comment": "Bundled T5 ladder (build 10): ANE cells FIRST (the product path), cpuOnly cells LAST. Plain cpuOnly 6-bit cells are refused before loading by the fp16-dequant memory preflight (≈7.25 GiB fresh + margin > headroom); the one forced cell at the end (force:true) overrides it to run the decisive test — crash = hypothesis A confirmed, the cursor stops the loop. Same protocol as Documents/auto.json, which still wins if pushed. Runs once; relaunch is blocked by Documents/auto_default.done.",
+  "comment": "Bundled T5 ladder (build 11, v3). Build 10 answered hypothesis A: 6-bit loads widen toward fp32 (0.5→10.25 GB climb, jetsam) — the ANE never took the graph. Build 11 asks: (1) does the PLAN probe show ANE ops for split_einsum, (2) does the fp16 payload load and run on GPU/ANE within the 12,273 MB budget, (3) does any 6-bit cell finally plateau at packed ~2.9 GB. Order: cheap ANE 6-bit probes first (they may jetsam; the cursor protects the rest), then fp16/GPU cells, then steps=30 timing cells, cpuOnly LAST where MemoryPreflight v2 refuses them with an explicit AUTO-SKIP (fp32 estimate 14,600+1,500 MB > budget; forced re-crash adds nothing). PLAN lines and reason=load-timeout in ladder.log drive the T5 verdict. Same protocol as Documents/auto.json, which still wins if pushed. Runs once; relaunch is blocked by Documents/auto_default.done.",
   "cells": [
-    {"units": "cpuAndNeuralEngine", "model": "sdpa",         "steps": 1,  "seed": 42},
     {"units": "cpuAndNeuralEngine", "model": "split_einsum", "steps": 1,  "seed": 42},
-    {"units": "cpuAndNeuralEngine", "model": "sdpa",         "steps": 5,  "seed": 42},
     {"units": "cpuAndNeuralEngine", "model": "split_einsum", "steps": 5,  "seed": 42},
-    {"units": "cpuAndNeuralEngine", "model": "sdpa",         "steps": 30, "seed": 42},
+    {"units": "cpuAndGPU",          "model": "fp16",         "steps": 1,  "seed": 42},
+    {"units": "cpuAndGPU",          "model": "fp16",         "steps": 5,  "seed": 42},
+    {"units": "all",                "model": "sdpa",         "steps": 1,  "seed": 42},
     {"units": "cpuAndNeuralEngine", "model": "split_einsum", "steps": 30, "seed": 42},
+    {"units": "cpuAndGPU",          "model": "fp16",         "steps": 30, "seed": 42},
+    {"units": "cpuAndGPU",          "model": "sdpa",         "steps": 5,  "seed": 42},
     {"units": "cpuOnly",            "model": "sdpa",         "steps": 1,  "seed": 42},
-    {"units": "cpuOnly",            "model": "split_einsum", "steps": 1,  "seed": 42},
-    {"units": "cpuOnly",            "model": "sdpa",         "steps": 5,  "seed": 42},
-    {"units": "cpuOnly",            "model": "split_einsum", "steps": 5,  "seed": 42},
-    {"units": "cpuOnly",            "model": "sdpa",         "steps": 30, "seed": 42, "force": true},
-    {"units": "cpuOnly",            "model": "split_einsum", "steps": 30, "seed": 42, "force": true}
+    {"units": "cpuOnly",            "model": "fp16",         "steps": 1,  "seed": 42}
   ]
 }

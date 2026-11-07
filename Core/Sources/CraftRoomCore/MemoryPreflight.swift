@@ -1,34 +1,49 @@
 import Foundation
 
-/// Estimated-footprint preflight for the CPU-backend cells (build 10).
+/// Estimated-footprint preflight for ladder cells (build 10 rules, revised to
+/// **v2** for build 11 after the build-10 telemetry).
 ///
-/// Evidence it comes from (iPad16,8, build 9, 2026-11-06 19:44): the first
-/// cell was `cpuOnly/sdpa/1`, the load line printed
-/// `load: SDPA cpuOnly · weights 6782 MB · headroom 12273 MB`, and the process
-/// died *inside* `MLModel(contentsOf:)` — no throw, no `ERROR` line, no
-/// `… loaded in X s`. The leading explanation (hypothesis A) is that the CPU
-/// backend de-palettizes the 6-bit LUT weights into a resident fp16 copy, so
-/// the load costs the *unpalettized* size instead of the shipped one:
+/// Build-10 measurement (iPad16,8, 2026-11-07): the load footprint of the
+/// 6-bit SDPA package on `cpuAndNeuralEngine` climbed 0.5 → 10.25 GB in 19 s
+/// and was jetsam-killed — the weights were being **de-palettized toward
+/// fp32**, not fp16: the model has 3.82 B params (palettized 3,816,113,664),
+/// so fp16 resident would plateau at 7,283 MiB and never reach 10 GB, while
+/// fp32 (15.3 GB = 14,567 MiB) is exactly where the climb was heading.
+/// `cpuOnly` in build 9 died the same way. Conclusions baked here:
 ///
-/// `sdxl/teacher/device_v2_io_contract.json`
-///   palettization.palettized_params    = 3,816,113,664 params
-///   × 2 B (fp16)                       = 7,632,227,328 B = 7,277 MiB
-///   package.fp16_bytes_unpalettized    = 7,641,885,480 B = 7,287 MiB
+///  * **cpuOnly + any UNet variant** (6-bit *or* fp16) → estimate the fp32
+///    widening, ≥ 14.5 GiB (`cpuUnpackedFP32MiB`): the CPU backend does not
+///    stop at fp16. With the 1,500 MiB working-set margin this exceeds the
+///    measured 12,273 MiB budget on this iPad → `AUTO-SKIP` before loading.
+///  * **fp16 variant on GPU/ANE** → estimate 7,250 MiB (`fp16WeightsMiB`,
+///    3.82 B × 2 B) + 1,500 margin = 8,750 MiB: fits the budget, so attempt.
+///  * **6-bit packed on ANE/GPU** → the *packed* estimate is 3,000 MiB, but
+///    build 10 showed the backends may widen it anyway. Never refuse these
+///    cells: they are the measurement (watchdog records the climb or the
+///    plateau); refusing would hide exactly the question being asked.
 ///
-/// so a 2.87 GB download is really a ~7.1 GiB load. Baked as the round
-/// **7,250 MiB** (just under both figures: the estimate must not be inflated
-/// by zip/metadata padding, and the shipped `.mlmodelc` is what is measured).
-/// A cell is refused when the app's remaining headroom cannot hold that plus a
-/// **1,500 MiB** working set (activations, the fp32 VAE, the harness arrays) —
-/// refusing is a measurement too, so it is logged as `AUTO-SKIP`, not hidden.
-///
-/// ANE/GPU cells are never refused here: palettized weights stay compressed for
-/// those backends, which is exactly the thing the ladder is measuring. And
-/// `force: true` on a cell overrides the estimate (the owner can always force
-/// the experiment), mirroring the app's "load even if impossible" toggle.
+/// `force: true` on a cell overrides every refusal, mirroring the app's
+/// "load even if impossible" toggle.
 public enum MemoryPreflight {
-    /// Dequantized fp16 weight footprint of a 6-bit palettized UNet+ControlNet.
-    public static let palettizedFP16WeightsMiB: Double = 7_250
+    /// Resident fp16 weights of the *unpalettized* UNet+ControlNet package
+    /// (3.82 B params × 2 B ≈ 7,283 MiB on disk; contract
+    /// `fp16_bytes_unpalettized` 7,641,885,480 B = 7,287 MiB).
+    public static let fp16WeightsMiB: Double = 7_250
+
+    /// Build-10 name kept for the contract figure (same number, documented
+    /// history): the fp16 de-palettization estimate that build 10 baked for
+    /// cpuOnly before the watchdog proved the widening went to **fp32**.
+    public static var palettizedFP16WeightsMiB: Double { fp16WeightsMiB }
+
+    /// What a `cpuOnly` UNet load actually costs: the CPU backend widens the
+    /// weights to fp32 (3.82 B × 4 B ≈ 14,567 MiB — the build-10 climb
+    /// direction, and why cpuOnly died in builds 9 and 10). ≥ 14.5 GiB.
+    public static let cpuUnpackedFP32MiB: Double = 14_600
+
+    /// Packed 6-bit footprint on ANE/GPU — *informational*: those cells are
+    /// never refused (the whole point of the ladder is whether the backend
+    /// keeps the LUT compressed).
+    public static let packed6BitMiB: Double = 3_000
 
     /// Extra headroom demanded on top of the estimate before a cell is allowed
     /// to run (activations + fp32 VAE decode + harness buffers).
@@ -47,20 +62,40 @@ public enum MemoryPreflight {
         }
     }
 
-    /// The machine-readable reason token used on the `AUTO-SKIP` line.
+    /// Machine-readable reason tokens for the `AUTO-SKIP` line.
     public static let cpuDequantReason = "cpu-backend-dequant-estimate"
+    public static let fp16WeightsReason = "fp16-weights-estimate"
 
-    /// Estimate (MiB) of what loading this cell's UNet costs the CPU backend,
-    /// nil when the cell is not exposed to the de-palettize path.
-    ///
-    /// Only `cpuOnly` with a **palettized** model qualifies: the fp16 (6-bit
-    /// free) package is already fp16 on disk, and ANE/GPU keep the LUT layout.
-    public static func cpuDequantEstimateMiB(units: String, modelName: String) -> Double? {
-        guard units == "cpuOnly" else { return nil }
-        // "…_6bit" is the palettized export in both attention variants; the
-        // unpalettized package name has no such suffix.
-        guard modelName.contains("6bit") else { return nil }
-        return palettizedFP16WeightsMiB
+    /// One cell's weight estimate: `miB` for the log line, `refuses` whether
+    /// a tight headroom may AUTO-SKIP it (6-bit ANE/GPU cells carry an
+    /// estimate but never refuse).
+    public struct Estimate: Equatable {
+        public let miB: Double
+        public let refuses: Bool
+        public let reason: String
+    }
+
+    /// Estimate for one ladder cell. The UNet is identified by the contract
+    /// model-name stem `canny1200`; everything else (VAEs, embeds) is nil.
+    public static func estimate(units: String, modelName: String) -> Estimate? {
+        guard modelName.contains("canny1200") else { return nil }
+        let packed = modelName.contains("6bit")
+        if units == "cpuOnly" {
+            // Any UNet on the CPU backend widens to fp32 (build-9/10 evidence:
+            // cpuOnly died the same way as ANE, mid-climb toward 15.3 GB).
+            return Estimate(miB: cpuUnpackedFP32MiB, refuses: true,
+                            reason: cpuDequantReason)
+        }
+        if !packed {
+            // The fp16 package on GPU/ANE: 7,250 + 1,500 = 8,750 MiB — this
+            // iPad's 12,273 MiB budget fits, so normally attempt; refuse only
+            // if something already ate most of the headroom.
+            return Estimate(miB: fp16WeightsMiB, refuses: true,
+                            reason: fp16WeightsReason)
+        }
+        // 6-bit packed on ANE/GPU: informational, never refuse (the ladder is
+        // measuring whether the backend keeps it packed).
+        return Estimate(miB: packed6BitMiB, refuses: false, reason: cpuDequantReason)
     }
 
     /// Decision for one cell. `headroomMB` is `os_proc_available_memory()`
@@ -68,23 +103,27 @@ public enum MemoryPreflight {
     /// silently drop data).
     public static func decide(headroomMB: Double?, estimateMB: Double?,
                               marginMB: Double = workingSetMarginMiB,
-                              force: Bool = false) -> Outcome {
+                              force: Bool = false,
+                              reason: String = cpuDequantReason) -> Outcome {
         guard !force, let estimateMB else { return .attempt }
         guard let headroomMB else { return .attempt }
         return headroomMB < estimateMB + marginMB
-            ? .skip(reason: cpuDequantReason)
+            ? .skip(reason: reason)
             : .attempt
     }
 
-    /// One-shot convenience used by the harness: estimate + decide in one call.
+    /// One-shot convenience used by the harness: estimate + decide in one
+    /// call. Informational estimates (`refuses == false`) always attempt.
     public static func decideCell(units: String, modelName: String,
                                   headroomMB: Double?, force: Bool = false) -> Outcome {
-        decide(headroomMB: headroomMB,
-               estimateMB: cpuDequantEstimateMiB(units: units, modelName: modelName),
-               force: force)
+        guard let est = estimate(units: units, modelName: modelName), est.refuses else {
+            return .attempt
+        }
+        return decide(headroomMB: headroomMB, estimateMB: est.miB,
+                      force: force, reason: est.reason)
     }
 
-    /// `needs 8750 MB of 12273 MB` style detail for the log line.
+    /// `needs 16100 MB of 12273 MB` style detail for the log line.
     public static func detail(headroomMB: Double?, estimateMB: Double,
                               marginMB: Double = workingSetMarginMiB) -> String {
         let need = String(format: "%.0f", estimateMB + marginMB)

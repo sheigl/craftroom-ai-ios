@@ -299,10 +299,12 @@ struct ContentView: View {
     // MARK: auto mode (unattended ladder)
 
     // Two ways in, both needing no taps beyond launching the app:
-    //  1. launch args: --auto --units=all|cpu_only|ane --model=sdpa|split_einsum
-    //                  --steps=30 --seed=42
+    //  1. launch args: --auto --units=all|cpuOnly|ane|gpu --model=sdpa|split_einsum|fp16
+    //                  --steps=30 --seed=42          (unknown spellings default forgiving)
     //  2. Documents/auto.json:
     //       {"cells":[{"units":"all","model":"sdpa","steps":1,"seed":42}, …]}
+    //      (build 11: a units/model typo fails the whole file — mislabelled
+    //       cells would poison the results table; see LadderUnits.strict)
     //  3. (build 9, no USB) bundled auto_default.json — units × attention ×
     //     steps full matrix, runs once; Documents/auto_default.done marks it.
     // Cells run back to back; each ends with one AUTO-RESULT line in
@@ -326,22 +328,25 @@ struct ContentView: View {
 
     @State private var autoStarted = false
     @State private var autoWaitLogged = false
+    @State private var autoParseFailLogged = false
     @State private var autoDim = false
     /// The crash cursor of this launch's ladder (see `LadderStore`): written to
     /// `Documents/ladder_cursor.json` before every cell so a jetsam kill after
     /// this line is attributable to a named cell.
     @State private var ladderCursor: LadderCursor?
 
-    private static func units(from s: String?) -> ComputeUnitsOption {
-        switch s {
-        case "cpu_only", "cpuOnly": return .cpuOnly
-        case "ane", "cpuAndNeuralEngine": return .cpuAndNeuralEngine
-        default: return .all
+    private static func units(from s: String?) -> ComputeUnitsOption? {
+        switch LadderUnits.strict(s) {
+        case .cpuOnly: return .cpuOnly
+        case .cpuAndNeuralEngine: return .cpuAndNeuralEngine
+        case .cpuAndGPU: return .cpuAndGPU
+        case .all: return .all
+        case nil: return nil   // an unknown unit would mislabel the matrix — fail the file
         }
     }
 
-    private static func variant(from s: String?) -> AttentionVariant {
-        AttentionVariant(rawValue: s ?? "") ?? .sdpa
+    private static func variant(from s: String?) -> AttentionVariant? {
+        AttentionVariant(rawValue: s ?? "")
     }
 
     enum AutoSource { case launchArgs, documents, bundled }
@@ -364,14 +369,19 @@ struct ContentView: View {
     private static func parseCells(_ data: Data) -> [AutoCell]? {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let raw = root["cells"] as? [[String: Any]], !raw.isEmpty else { return nil }
-        return raw.map { c in
-            AutoCell(units: Self.units(from: c["units"] as? String),
-                     variant: Self.variant(from: c["model"] as? String),
-                     steps: max(1, min(30, (c["steps"] as? NSNumber)?.intValue
-                                        ?? (c["maxSteps"] as? NSNumber)?.intValue ?? 30)),
-                     seed: (c["seed"] as? NSNumber)?.uint64Value ?? 42,
-                     force: (c["force"] as? NSNumber)?.boolValue ?? false)
+        var cells: [AutoCell] = []
+        for c in raw {
+            // A typo in units/model must fail the whole file loudly (parse-failed
+            // is logged) rather than silently run as all/sdpa mislabelled cells.
+            guard let units = Self.units(from: c["units"] as? String),
+                  let variant = Self.variant(from: c["model"] as? String) else { return nil }
+            cells.append(AutoCell(units: units, variant: variant,
+                                  steps: max(1, min(30, (c["steps"] as? NSNumber)?.intValue
+                                                    ?? (c["maxSteps"] as? NSNumber)?.intValue ?? 30)),
+                                  seed: (c["seed"] as? NSNumber)?.uint64Value ?? 42,
+                                  force: (c["force"] as? NSNumber)?.boolValue ?? false))
         }
+        return cells
     }
 
     /// Ladder cells and their source. Priority: launch args →
@@ -379,9 +389,20 @@ struct ContentView: View {
     /// skipped once auto_default.done marks a finished run.
     private func autoLadder() -> (cells: [AutoCell], source: AutoSource)? {
         if let single = launchArgCell() { return ([single], .launchArgs) }
-        if let url = Self.autoJSONURL(),
-           let data = try? Data(contentsOf: url),
-           let cells = Self.parseCells(data) { return (cells, .documents) }
+        if let url = Self.autoJSONURL(), let data = try? Data(contentsOf: url) {
+            if let cells = Self.parseCells(data) { return (cells, .documents) }
+            // A pushed auto.json is an explicit instruction. Since build 11 a
+            // bad units/model token fails the WHOLE file — and then the file
+            // must fail loudly, never silently hand over to the bundled
+            // matrix the owner deliberately replaced.
+            if !autoParseFailLogged {
+                autoParseFailLogged = true
+                LadderLog.append("ERROR auto: auto.json parse failed — every cell needs a"
+                    + " known units (all|cpuAndNeuralEngine|cpuAndGPU|cpuOnly) and model"
+                    + " (sdpa|split_einsum|fp16); bundled ladder NOT started")
+            }
+            return nil
+        }
         if let done = Self.autoDefaultDoneURL(),
            FileManager.default.fileExists(atPath: done.path) { return nil }
         if let url = Bundle.main.url(forResource: "auto_default", withExtension: "json"),
@@ -397,8 +418,10 @@ struct ContentView: View {
             guard let i = a.firstIndex(of: key), i + 1 < a.count else { return nil }
             return a[i + 1]
         }
-        return AutoCell(units: Self.units(from: val("--units")),
-                        variant: Self.variant(from: val("--model")),
+        // Manual (USB/pdm3) runs keep the forgiving defaults; only the
+        // unattended matrices go strict via parseCells.
+        return AutoCell(units: Self.units(from: val("--units")) ?? .all,
+                        variant: Self.variant(from: val("--model")) ?? .sdpa,
                         steps: max(1, min(30, Int(val("--steps") ?? "30") ?? 30)),
                         seed: UInt64(val("--seed") ?? "42") ?? 42,
                         force: a.contains("--force"))
@@ -472,8 +495,11 @@ struct ContentView: View {
     /// dead cell be a data point":
     ///
     ///  * cells already settled by an earlier process are skipped (`RESUME-SKIP`);
-    ///  * a `cpuOnly` cell whose de-quantized fp16 estimate does not fit the
-    ///    remaining headroom is refused without attempting it (`AUTO-SKIP`);
+    ///  * MemoryPreflight v2 refuses the cells certain to jetsam (any UNet on
+    ///    `cpuOnly`; an fp16 load whose 8,750 MB estimate no longer fits the
+    ///    headroom) without attempting them (`AUTO-SKIP`);
+    ///  * a PLAN probe (build 11) answers per variant whether the ANE takes
+    ///    the graph, before that variant's first load;
     ///  * every attempt is announced with `START cell=… attempt=N` *before* the
     ///    load, and the cursor is on disk first, so a kill is attributable;
     ///  * an error marks the cell failed and the pass continues (3 in a row
@@ -513,18 +539,32 @@ struct ContentView: View {
                     LadderLog.append("RESUME-SKIP cell=\(cell.label) reason=already-\(st.rawValue)")
                     continue
                 }
-                // ---- estimated-skip preflight (cpuOnly + palettized only) ---
+                // ---- this cell's variant payload installed? (build 11) ------
+                // The store's ready state covers the SELECTED variant only; the
+                // ladder spans three. An uninstalled 7.6 GB fp16 group must be
+                // a readable AUTO-SKIP, not three mystery "not installed"
+                // failures that stop the pass.
+                if !PayloadStore.shared.isReady(variant: cell.variant.rawValue) {
+                    cursor?.skip(idx)
+                    Self.persist(cursor)
+                    LadderLog.append("AUTO-SKIP cell=\(cell.label) reason=payload-missing"
+                        + " · \(cell.variant.modelName) not downloaded — pick the"
+                        + " \(cell.variant.rawValue) variant in the payload UI first")
+                    continue
+                }
+                // ---- MemoryPreflight v2: refuse what is certain to jetsam ---
                 let headroom = Diagnostics.availableMemoryMB()
-                if let estimate = MemoryPreflight.cpuDequantEstimateMiB(
-                    units: cell.units.rawValue, modelName: cell.variant.modelName),
-                   case .skip(let reason) = MemoryPreflight.decide(
-                        headroomMB: headroom, estimateMB: estimate, force: cell.force || force) {
+                if let est = MemoryPreflight.estimate(units: cell.units.rawValue,
+                                                      modelName: cell.variant.modelName),
+                   case .skip(let reason) = MemoryPreflight.decideCell(
+                       units: cell.units.rawValue, modelName: cell.variant.modelName,
+                       headroomMB: headroom, force: cell.force || force) {
                     cursor?.skip(idx)
                     Self.persist(cursor)
                     LadderLog.append(String(format:
                         "AUTO-SKIP cell=%@ reason=%@ · %@ · footprint %.0f MB",
                         cell.label, reason,
-                        MemoryPreflight.detail(headroomMB: headroom, estimateMB: estimate),
+                        MemoryPreflight.detail(headroomMB: headroom, estimateMB: est.miB),
                         Diagnostics.footprintMB()))
                     continue
                 }
@@ -537,6 +577,12 @@ struct ContentView: View {
                     "START cell=%@ attempt=%d index=%d/%d · footprint %.0f MB · headroom %@ MB",
                     cell.label, attempt, idx + 1, cells.count,
                     Diagnostics.footprintMB(), free))
+                // ---- PLAN probe (build 11): which device actually runs this
+                // graph? Metadata only — no weight byte is materialised — but
+                // plan compile can take minutes on a graph this size, so the
+                // cursor line and START are already on disk and the watchdog
+                // covers it. Once per variant; a failed probe is a data line.
+                PlanProbe.probeIfNeeded(variant: cell.variant, units: cell.units)
                 if !didReset {
                     Diagnostics.reset("run on \(cell.label) seed \(cell.seed)"
                         + " photo \(Int(photo.size.width))x\(Int(photo.size.height))")
@@ -588,12 +634,17 @@ struct ContentView: View {
                 } catch {
                     let msg = error.localizedDescription
                     let failedAt = lastStage
+                    // The 15-min load timeout throws (the abandoned load keeps
+                    // growing under the watchdog); name it in the machine line
+                    // so the decision tree can read reason=load-timeout.
+                    let reason = msg.localizedCaseInsensitiveContains("load-timeout")
+                        ? "load-timeout" : "error"
                     cursor?.settle(idx, .failed)
                     Self.persist(cursor)
                     consecutiveFailures += 1
                     Diagnostics.log("ERROR at \(failedAt): \(msg)")
                     LadderLog.append("FAILED cell=\(cell.label) attempt=\(attempt)"
-                        + " at \(failedAt): \(msg)")
+                        + " reason=\(reason) at \(failedAt): \(msg)")
                     await MainActor.run {
                         status = "\(failedAt) failed: \(msg)"
                         logText = Diagnostics.tail()

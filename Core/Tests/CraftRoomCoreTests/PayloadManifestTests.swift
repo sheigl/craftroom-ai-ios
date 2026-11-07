@@ -12,16 +12,18 @@ final class PayloadManifestTests: XCTestCase {
         let m = try manifest()
         XCTAssertEqual(m.version, "device-v2")
         XCTAssertEqual(m.defaultVariant, "sdpa")
-        XCTAssertEqual(Set(m.variants.keys), ["sdpa", "split_einsum"])
+        XCTAssertEqual(Set(m.variants.keys), ["sdpa", "split_einsum", "fp16"],
+                       "build 11 adds the fp16 unpalettized fallback variant")
         XCTAssertTrue(m.urlBase.hasPrefix("https://"),
                       "the default base must be the published payload, not a LAN address")
-        XCTAssertEqual(m.files.count, 18, "2 UNet trees x 5 files + VAE decoder 5 + 3 embeds")
+        XCTAssertEqual(m.files.count, 23,
+                       "3 UNet trees x 5 files + VAE decoder 5 + 3 embeds")
         for f in m.files {
             XCTAssertEqual(f.sha256.count, 64, "\(f.path): sha256 must be hex-64")
             XCTAssertTrue(f.sha256.allSatisfy { $0.isHexDigit })
             XCTAssertGreaterThan(f.size, 0)
             XCTAssertFalse(f.path.hasPrefix("/"), "paths must be relative to urlBase")
-            XCTAssertTrue(["common", "sdpa", "split_einsum"].contains(f.group),
+            XCTAssertTrue(["common", "sdpa", "split_einsum", "fp16"].contains(f.group),
                           "\(f.path): unknown group \(f.group)")
         }
     }
@@ -72,6 +74,36 @@ final class PayloadManifestTests: XCTestCase {
         XCTAssertEqual(split.sha256, weight.sha256,
                        "same 6-bit LUT weights, only the attention layout differs")
     }
+
+    /// Build 11: the fp16 fallback variant — same frozen student unpalettized,
+    /// compiled by GitHub Actions from release `payload-fp16-2026-11-07`.
+    func testFP16VariantIsTheUnpalettizedFallback() throws {
+        let m = try manifest()
+        let fp16 = try m.entries(forVariant: "fp16")
+        XCTAssertEqual(fp16.count, 13, "own UNet tree + the shared VAE + embeds")
+        XCTAssertEqual(try m.modelDirectory(forVariant: "fp16"),
+                       "Unet_ControlNet_canny1200_fp16.mlmodelc")
+        XCTAssertFalse(fp16.contains { $0.path.contains("6bit") },
+                       "the fp16 download must not carry a 6-bit tree")
+        let w = try XCTUnwrap(m.files.first {
+            $0.path == "Unet_ControlNet_canny1200_fp16.mlmodelc/weights/weight.bin"
+        })
+        // 3.82 B params × 2 B ≈ the contract's fp16_bytes_unpalettized figure.
+        XCTAssertGreaterThan(w.size, 7_600_000_000)
+        XCTAssertNotEqual(w.sha256,
+                          "66bf237e6d132d9ad63ac466cdbfdd97f7d251f3f918ca01f5babd5272e361c0",
+                          "fp16 weights are not the 6-bit LUT bytes")
+        XCTAssertEqual(w.sha256, FP16_WEIGHT_SHA256)
+        let bytes = try m.bytes(forVariant: "fp16")
+        XCTAssertGreaterThan(bytes, 7_700_000_000, "≈7.64 GB UNet + 202 MB common")
+        XCTAssertLessThan(bytes, 8_100_000_000)
+    }
+
+    /// The CI-compiled artifact byte for byte (compile run 42375239168; the
+    /// compiled weight.bin is the package weight.bin passed through, sha
+    /// identical to the runner's `shasum` of the unzipped package).
+    private static let FP16_WEIGHT_SHA256 =
+        "8770f6cebe95d02aaa40e0c87b28dbcbe790ff3c878b3308822f98d9b81ee723"
 
     func testHonoursTheT5BaseOverride() throws {
         let m = try manifest()

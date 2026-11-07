@@ -7,6 +7,7 @@ enum ComputeUnitsOption: String, CaseIterable, Identifiable {
     /// "all" = ANE + GPU + CPU (Core ML's own scheduling).
     case all = "all"
     case cpuAndNeuralEngine = "cpuAndNeuralEngine"
+    case cpuAndGPU = "cpuAndGPU"
     case cpuOnly = "cpuOnly"
 
     var id: String { rawValue }
@@ -15,6 +16,7 @@ enum ComputeUnitsOption: String, CaseIterable, Identifiable {
         switch self {
         case .all:               return .all
         case .cpuAndNeuralEngine: return .cpuAndNeuralEngine
+        case .cpuAndGPU:          return .cpuAndGPU
         case .cpuOnly:            return .cpuOnly
         }
     }
@@ -23,17 +25,33 @@ enum ComputeUnitsOption: String, CaseIterable, Identifiable {
         switch self {
         case .all: return "All (ANE+GPU)"
         case .cpuAndNeuralEngine: return "ANE+CPU"
+        case .cpuAndGPU: return "GPU+CPU"
         case .cpuOnly: return "CPU only"
+        }
+    }
+
+    /// Shared canonical parsing (Core, unit-tested): accepts `cpuOnly`,
+    /// `cpu_only`, `ane`, `cpuAndGPU`, `gpu`, `all`, …; unknown → `all`.
+    init(canonical raw: String?) {
+        switch LadderUnits.canonical(raw) {
+        case .cpuOnly: self = .cpuOnly
+        case .cpuAndNeuralEngine: self = .cpuAndNeuralEngine
+        case .cpuAndGPU: self = .cpuAndGPU
+        case .all: self = .all
         }
     }
 }
 
-/// The two numerically identical UNet exports (contract §6.4): SDPA is the
-/// shipping candidate, split_einsum is the apple-style per-head attention
-/// layout built for the A/B.
+/// The UNet exports the ladder measures (contract §6.4 + the fp16 package of
+/// the build-11 fallback): SDPA and split_einsum are the numerically
+/// identical 6-bit palettized pair; **fp16** is the same graph unpalettized
+/// (3.82 B params × 2 B ≈ 7.3 GB resident) — the shippable fallback if no
+/// backend keeps the 6-bit LUT compressed. The variant's rawValue doubles as
+/// its payload-manifest variant key.
 enum AttentionVariant: String, CaseIterable, Identifiable {
     case sdpa
     case splitEinsum = "split_einsum"
+    case fp16
 
     var id: String { rawValue }
 
@@ -41,6 +59,7 @@ enum AttentionVariant: String, CaseIterable, Identifiable {
         switch self {
         case .sdpa: return "Unet_ControlNet_canny1200_6bit"
         case .splitEinsum: return "Unet_ControlNet_canny1200_split_einsum_6bit"
+        case .fp16: return "Unet_ControlNet_canny1200_fp16"
         }
     }
 
@@ -48,6 +67,7 @@ enum AttentionVariant: String, CaseIterable, Identifiable {
         switch self {
         case .sdpa: return "SDPA"
         case .splitEinsum: return "split_einsum"
+        case .fp16: return "FP16"
         }
     }
 }
@@ -115,12 +135,13 @@ final class Inference {
     func loadModels(units: ComputeUnitsOption, variant: AttentionVariant,
                     force: Bool = true) throws -> Double {
         let t0 = Date()
-        let weightsMB = Double(PayloadStore.shared.variantWeightBytes) / 1_048_576.0
+        let weightsMB = Double(PayloadStore.shared.variantWeightBytes(forVariant: variant.rawValue))
+            / 1_048_576.0
         let headroom = Diagnostics.availableMemoryMB()
         let headText = headroom.map { String(format: "%.0f", $0) } ?? "n/a"
-        let estimate = MemoryPreflight.cpuDequantEstimateMiB(units: units.rawValue,
-                                                            modelName: variant.modelName)
-        let estText = estimate.map { String(format: " · estimate %.0f MB", $0) } ?? ""
+        let estimate = MemoryPreflight.estimate(units: units.rawValue,
+                                                modelName: variant.modelName)
+        let estText = estimate.map { String(format: " · estimate %.0f MB", $0.miB) } ?? ""
         LadderLog.instrument(String(format: "load: %@ %@ · weights %.0f MB · headroom %@ MB"
             + " · footprint %.0f MB%@",
             variant.label, units.rawValue, weightsMB, headText,
@@ -162,6 +183,18 @@ final class Inference {
         scheduler = nil
     }
 
+    /// Load timeout for one blocking `MLModel(contentsOf:)`.
+    ///
+    /// Build-11 rationale: an ANE cold-plan compile of this graph may take
+    /// *minutes* on first load (external evidence: even tiny graphs take ~1
+    /// min on a cold ANE plan). Build 10 had no timeout at all and died to
+    /// jetsam instead; build 11 waits generously and *then* gives the cell an
+    /// explicit verdict (`FAILED … reason=load-timeout`) instead of
+    /// silently holding the ladder. The abandoned load keeps running on its
+    /// own queue (an `MLModel` init is not cancellable) — the footprint
+    /// watchdog keeps logging it, which is itself the measurement.
+    static let loadTimeoutSeconds: TimeInterval = 15 * 60
+
     /// Loads one model by payload name, honouring the manifest's shipping form.
     ///
     /// `form: "mlmodelc"` (everything served today): the downloaded compiled tree
@@ -171,29 +204,52 @@ final class Inference {
     ///
     /// `phase` labels the footprint-watchdog lines around the blocking call.
     static func loadModel(named: String, units: MLComputeUnits,
-                          phase: String = "load") throws -> MLModel {
+                          phase: String = "load",
+                          timeout: TimeInterval = loadTimeoutSeconds) throws -> MLModel {
         let cfg = MLModelConfiguration()
         cfg.computeUnits = units
         let watch = LoadWatchdog.start(model: named, phase: phase)
         defer { watch.stop() }
-        do {
-            switch PayloadStore.shared.modelSource(named: named) {
-            case .compiled(let dir):
-                return try MLModel(contentsOf: dir, configuration: cfg)
-            case .package(let pkg):
-                let compiled = try DeviceCompiler.compiledURL(forModelNamed: named,
-                                                              sourcePackage: pkg)
-                return try MLModel(contentsOf: compiled, configuration: cfg)
-            case nil:
-                if let u = Bundle.main.url(forResource: named, withExtension: "mlmodelc") {
-                    return try MLModel(contentsOf: u, configuration: cfg)
+        let sem = DispatchSemaphore(value: 0)
+        var result: Result<MLModel, Error>?
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                switch PayloadStore.shared.modelSource(named: named) {
+                case .compiled(let dir):
+                    result = .success(try MLModel(contentsOf: dir, configuration: cfg))
+                case .package(let pkg):
+                    let compiled = try DeviceCompiler.compiledURL(forModelNamed: named,
+                                                                  sourcePackage: pkg)
+                    result = .success(try MLModel(contentsOf: compiled, configuration: cfg))
+                case nil:
+                    if let u = Bundle.main.url(forResource: named, withExtension: "mlmodelc") {
+                        result = .success(try MLModel(contentsOf: u, configuration: cfg))
+                    } else {
+                        result = .failure(PipError.model(
+                            "not installed: \(named) — download the device-v2 payload"))
+                    }
                 }
-                throw PipError.model("not installed: \(named) — download the device-v2 payload")
+            } catch {
+                // A jetsam kill never gets here; anything that *does* arrive has
+                // to be visible in telemetry, with the units that were asked for.
+                result = .failure(PipError.model(
+                    "\(named) [\(units.rawValue)]: \(error.localizedDescription)"))
             }
-        } catch {
-            // A jetsam kill never gets here; anything that *does* arrive has to
-            // be visible in telemetry, with the units that were asked for.
-            throw PipError.model("\(named) [\(units.rawValue)]: \(error.localizedDescription)")
+            sem.signal()
+        }
+        if sem.wait(timeout: .now() + timeout) == .timedOut {
+            // Deliberately not cancelling the thread: MLModel init is not
+            // cancellable, and the watchdog lines keep measuring it.
+            LadderLog.instrument(String(format:
+                "load TIMEOUT model=%@ phase=%@ after %.0f s (units=%@) — abandoning wait,"
+                + " footprint %.0f MB", named, phase, timeout, units.rawValue,
+                Diagnostics.footprintMB()))
+            throw PipError.model("load-timeout \(named) [\(units.rawValue)]"
+                + " after \(String(format: "%.0f", timeout))s")
+        }
+        switch result ?? .failure(PipError.model("load \(named): no result")) {
+        case .success(let model): return model
+        case .failure(let error): throw error
         }
     }
 

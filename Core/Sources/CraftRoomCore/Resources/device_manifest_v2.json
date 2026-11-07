@@ -4,6 +4,7 @@
  "models": [
   "Unet_ControlNet_canny1200_6bit.mlmodelc",
   "Unet_ControlNet_canny1200_split_einsum_6bit.mlmodelc",
+  "Unet_ControlNet_canny1200_fp16.mlmodelc",
   "VAEDecoder_sdxl_fp32.mlmodelc",
   "embeds"
  ],
@@ -17,6 +18,11 @@
    "model": "Unet_ControlNet_canny1200_split_einsum_6bit.mlmodelc",
    "group": "split_einsum",
    "label": "split_einsum attention (A/B alternate)"
+  },
+  "fp16": {
+   "model": "Unet_ControlNet_canny1200_fp16.mlmodelc",
+   "group": "fp16",
+   "label": "fp16 unpalettized fallback (build 11, GPU path)"
   }
  },
  "defaultVariant": "sdpa",
@@ -100,6 +106,36 @@
    "group": "sdpa"
   },
   {
+   "path": "Unet_ControlNet_canny1200_fp16.mlmodelc/analytics/coremldata.bin",
+   "size": 243,
+   "sha256": "01ea4db819466e374a07355628d86db8b713f2d82fea3ecc7ab4c4dc9dc6df20",
+   "group": "fp16"
+  },
+  {
+   "path": "Unet_ControlNet_canny1200_fp16.mlmodelc/coremldata.bin",
+   "size": 532,
+   "sha256": "7c1633d2fbd272e72d0dcc8c353774fe18ef0f08b75f15f1537a9b5349913efd",
+   "group": "fp16"
+  },
+  {
+   "path": "Unet_ControlNet_canny1200_fp16.mlmodelc/metadata.json",
+   "size": 3795,
+   "sha256": "d7f7e679c3db327e4a29b4a5d3e3bc6265f838d53618d5d8a53b25ee87e00857",
+   "group": "fp16"
+  },
+  {
+   "path": "Unet_ControlNet_canny1200_fp16.mlmodelc/model.mil",
+   "size": 2914521,
+   "sha256": "bed542b6afc19774528b97d218c27b10bab329cdc3d36b177989f3cd1dbf4b86",
+   "group": "fp16"
+  },
+  {
+   "path": "Unet_ControlNet_canny1200_fp16.mlmodelc/weights/weight.bin",
+   "size": 7637149504,
+   "sha256": "8770f6cebe95d02aaa40e0c87b28dbcbe790ff3c878b3308822f98d9b81ee723",
+   "group": "fp16"
+  },
+  {
    "path": "Unet_ControlNet_canny1200_split_einsum_6bit.mlmodelc/analytics/coremldata.bin",
    "size": 243,
    "sha256": "6d9e6b8ba1094a5779f2d116285f3c17b14d4fc46d40e162bbd1bd707ba66abb",
@@ -130,17 +166,20 @@
    "group": "split_einsum"
   }
  ],
- "totalBytes": 5962354377,
+ "totalBytes": 13602422972,
  "byteAccounting": {
   "common": 198791945,
   "sdpa": 2870434113,
   "split_einsum": 2893128319,
+  "fp16": 7640068595,
   "downloadSdpa": 3069226058,
-  "downloadSplitEinsum": 3091920264
+  "downloadSplitEinsum": 3091920264,
+  "downloadFp16": 7838860540
  },
  "notes": [
   "path is relative to urlBase; the harness may override urlBase from Documents/payload_base_url.txt (T5 LAN server)",
   "sdpa and split_einsum share every file except the UNet model (identical weights, different attention op layout)",
+  "fp16 is the same frozen student unpalettized (~7.64 GB weights): build-10 showed 6-bit loads widen toward fp32, so this variant is the measurement of a payload the GPU backend can take directly",
   "VAE decoder is fp32 and must run on cpuAndGPU (no ANE compute type)",
   "VAE encoder omitted: the product path is txt2img from noise"
  ]

@@ -140,8 +140,21 @@ final class PayloadStore: NSObject, URLSessionDataDelegate {
 
     /// Entries needed for the selected variant, in manifest order.
     var entries: [PayloadManifestV2.FileEntry] {
+        entries(forVariant: variantKey)
+    }
+
+    /// Entries for an **arbitrary** variant key — the auto ladder spans more
+    /// than one variant group (build 11: sdpa + split_einsum + fp16), so the
+    /// per-cell payload check and download cannot be limited to the selection.
+    func entries(forVariant key: String) -> [PayloadManifestV2.FileEntry] {
         guard let m = manifestV2 else { return [] }
-        return (try? m.entries(forVariant: variantKey)) ?? []
+        return (try? m.entries(forVariant: key)) ?? []
+    }
+
+    /// Every file of an arbitrary variant present at its declared size.
+    func isReady(variant key: String) -> Bool {
+        let es = entries(forVariant: key)
+        return !es.isEmpty && es.allSatisfy { Self.fileComplete($0, in: root) }
     }
 
     // MARK: state
@@ -191,8 +204,13 @@ final class PayloadStore: NSObject, URLSessionDataDelegate {
     /// Weight bytes of the **selected variant** only — the honest number for a
     /// load line, where `Diagnostics.bundledWeightBytes()` also counts stale
     /// `weight.bin` files of an older payload still sitting in the store.
-    var variantWeightBytes: Int64 {
-        entries.filter { $0.path.hasSuffix("weight.bin") }.reduce(0) { $0 + $1.size }
+    var variantWeightBytes: Int64 { variantWeightBytes(forVariant: variantKey) }
+
+    /// Weight bytes for one variant key (a ladder cell's variant may not be
+    /// the store's selection).
+    func variantWeightBytes(forVariant key: String) -> Int64 {
+        entries(forVariant: key).filter { $0.path.hasSuffix("weight.bin") }
+            .reduce(0) { $0 + $1.size }
     }
 
     /// The downloaded model directory for the loader, nil until every file of
@@ -214,7 +232,9 @@ final class PayloadStore: NSObject, URLSessionDataDelegate {
             } else {
                 return nil
             }
-            let files = entries.filter { $0.path.hasPrefix(modelDirName + "/") }
+            let files = (manifestV2?.files ?? entries).filter {
+                $0.path.hasPrefix(modelDirName + "/")
+            }
             guard !files.isEmpty,
                   files.allSatisfy({ Self.fileComplete($0, in: root) }) else { return nil }
             return root.appendingPathComponent(modelDirName)
