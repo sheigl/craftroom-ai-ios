@@ -72,7 +72,7 @@ final class LadderController: ObservableObject {
 
     // MARK: ladder sources
 
-    private static func units(from s: String?) -> ComputeUnitsOption? {
+    private nonisolated static func units(from s: String?) -> ComputeUnitsOption? {
         switch LadderUnits.strict(s) {
         case .cpuOnly: return .cpuOnly
         case .cpuAndNeuralEngine: return .cpuAndNeuralEngine
@@ -82,22 +82,22 @@ final class LadderController: ObservableObject {
         }
     }
 
-    private static func variant(from s: String?) -> AttentionVariant? {
+    private nonisolated static func variant(from s: String?) -> AttentionVariant? {
         AttentionVariant(rawValue: s ?? "")
     }
 
-    private static func autoJSONURL() -> URL? {
+    private nonisolated static func autoJSONURL() -> URL? {
         PayloadStore.documentsURL?.appendingPathComponent("auto.json")
     }
 
     /// Written after a BUNDLED ladder finishes so a relaunch never repeats the
     /// hours-long matrix (the pushed-file equivalent is the rename to
     /// auto.done.json).
-    private static func autoDefaultDoneURL() -> URL? { LadderStore.defaultDoneURL }
+    private nonisolated static func autoDefaultDoneURL() -> URL? { LadderStore.defaultDoneURL }
 
     /// `{"cells":[{units, model, steps, seed, force}, …]}` — same protocol for
     /// the pushed auto.json and the bundled auto_default.json.
-    private static func parseCells(_ data: Data) -> [AutoCell]? {
+    private nonisolated static func parseCells(_ data: Data) -> [AutoCell]? {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let raw = root["cells"] as? [[String: Any]], !raw.isEmpty else { return nil }
         var cells: [AutoCell] = []
@@ -373,15 +373,15 @@ final class LadderController: ObservableObject {
     }
 
     /// The cursor on disk is always one step ahead of the work.
-    private static func persist(_ cursor: LadderCursor?) {
+    private nonisolated static func persist(_ cursor: LadderCursor?) {
         if let cursor { LadderStore.save(cursor) }
     }
 
     /// How many failures in a row end a pass.
-    private static let consecutiveFailureStop = 3
+    private nonisolated static let consecutiveFailureStop = 3
 
     /// One machine-readable line per ladder cell (v0.4 field names kept).
-    private static func autoResult(_ s: RunStats, _ cell: AutoCell) -> String {
+    private nonisolated static func autoResult(_ s: RunStats, _ cell: AutoCell) -> String {
         let sorted = s.stepMillis.sorted()
         let med = sorted.isEmpty ? 0 : sorted[max(0, sorted.count / 2 - 1)]
         return "AUTO-RESULT units=\(s.units) model=\(cell.variant.rawValue)"
@@ -395,7 +395,7 @@ final class LadderController: ObservableObject {
 
     /// Renders land in Documents/renders/ so the grading round can pull them
     /// over AFC/Finder without another share sheet (naming unchanged).
-    private static func saveRender(_ image: UIImage, cell: AutoCell, seed: UInt64) -> String? {
+    private nonisolated static func saveRender(_ image: UIImage, cell: AutoCell, seed: UInt64) -> String? {
         guard let data = image.pngData() else { return nil }
         let formatter = DateFormatter()
         formatter.dateFormat = "HHmmss"
