@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       revoke_id:
-        description: App Store Connect certificate id to DELETE (empty = list only)
+        description: App Store Connect certificate ids to DELETE, space-separated (empty = list only)
         required: false
         default: ""
         type: string
@@ -66,14 +66,35 @@ jobs:
                     "serial", a.get("serialNumber"), "rawkeys", sorted(a.keys()))'
           done
 
-      - name: Revoke (only when an id was supplied)
+      - name: Revoke (only when ids were supplied)
         if: ${{ github.event.inputs.revoke_id != '' }}
         env:
           T: ${{ env.ASC_JWT }}
           REVOKE_ID: ${{ github.event.inputs.revoke_id }}
         run: |
+          set -uo pipefail
+          for ID in $REVOKE_ID; do
+            code=$(curl -sS -o /tmp/resp.json -w '%{http_code}' -X DELETE \
+              -H "Authorization: Bearer $T" \
+              "https://api.appstoreconnect.apple.com/v1/certificates/$ID")
+            echo "$ID → HTTP $code $(head -c 200 /tmp/resp.json)"
+          done
+          true
+
+      - name: List again (post-revocation state)
+        if: ${{ github.event.inputs.revoke_id != '' }}
+        env:
+          T: ${{ env.ASC_JWT }}
+        run: |
           set -euo pipefail
-          curl -sS -X DELETE -H "Authorization: Bearer $T" \
-            "https://api.appstoreconnect.apple.com/v1/certificates/$REVOKE_ID" \
-            | head -c 800
-          echo
+          for TYPE in DISTRIBUTION DEVELOPMENT; do
+            echo "=== $TYPE ==="
+            curl -sSg -H "Authorization: Bearer $T" \
+              "https://api.appstoreconnect.apple.com/v1/certificates?filter[certificateType]=$TYPE&limit=100" \
+              | python3 -c 'import json,sys
+          d = json.load(sys.stdin)
+          if "errors" in d: print(json.dumps(d["errors"], indent=1)); raise SystemExit(1)
+          for c in d.get("data", []):
+              a = c["attributes"]
+              print(c["id"], a.get("certificateType"), a.get("name"), a.get("displayName"))'
+          done
