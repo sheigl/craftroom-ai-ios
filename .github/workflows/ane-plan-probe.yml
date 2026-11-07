@@ -48,7 +48,9 @@ on:
     branches: [ci/ane-probe]
 
 concurrency:
-  group: ane-plan-probe-${{ inputs.label }}
+  # One run per label on dispatch; the bootstrap push path has no inputs, so it
+  # gets a per-run group instead of queueing every variant behind the first.
+  group: ane-plan-probe-${{ inputs.label != '' && inputs.label || github.run_id }}
   cancel-in-progress: false
 
 jobs:
