@@ -65,7 +65,7 @@ enum DeviceCompiler {
             name, sourcePackage.lastPathComponent, freeCacheMB(), started))
         do {
             let compiled = try MLModel.compileModel(at: sourcePackage)
-            publish(compiled, to: target)
+            try publish(compiled, to: target)
             LadderLog.instrument(String(format:
                 "compile on device %@ in %.1f s → Caches/DeviceCompiled/%@"
                 + " · footprint %.0f → %.0f MB",
