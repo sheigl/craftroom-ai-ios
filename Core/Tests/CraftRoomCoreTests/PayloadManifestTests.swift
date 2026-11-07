@@ -93,7 +93,7 @@ final class PayloadManifestTests: XCTestCase {
         XCTAssertNotEqual(w.sha256,
                           "66bf237e6d132d9ad63ac466cdbfdd97f7d251f3f918ca01f5babd5272e361c0",
                           "fp16 weights are not the 6-bit LUT bytes")
-        XCTAssertEqual(w.sha256, FP16_WEIGHT_SHA256)
+        XCTAssertEqual(w.sha256, Self.FP16_WEIGHT_SHA256)
         let bytes = try m.bytes(forVariant: "fp16")
         XCTAssertGreaterThan(bytes, 7_700_000_000, "≈7.64 GB UNet + 202 MB common")
         XCTAssertLessThan(bytes, 8_100_000_000)
